@@ -61,6 +61,7 @@ def post(item):
             media = []
         logger.debug(f"text={text_post}, reply_settings={reply_settings}, quote_tweet_id={quote_id}, in_reply_to_tweet_id={reply_id}, media_ids={media_ids}")
         a = twitter_client.create_tweet(text=text_post, reply_settings=reply_settings, quote_tweet_id=quote_id, in_reply_to_tweet_id=reply_id, media_ids=media_ids)
+        media_ids = None # Media is only uploaded to first post, so it is removed from the variable
         logger.debug(a)
         # If a quote post gets split, only the first post quotes, and the second becomes just a reply to that post
         quote_id = None
