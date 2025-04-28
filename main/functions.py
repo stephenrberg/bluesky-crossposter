@@ -79,7 +79,24 @@ def split_text(text, max_chars):
             o += 1
         # If the newly created post is short enough, it is added to the post array.
         if len(post) <= max_chars:
-            posts.append(post)
+            words = post.split()
+            all_hashtags = all(word.startswith('#') for word in words)
+            if not all_hashtags:
+                posts.append(post)
+            else:
+                # Handle the case where the current post is all hashtags.
+                if posts:  # If there's a previous post...
+                    previous_post = posts[-1]
+                    hashtags_to_add = []
+                    for word in words:
+                        if len(previous_post + "\n\r" + " ".join(hashtags_to_add) + word) <= max_chars:
+                            hashtags_to_add.append(word)
+                        else:
+                            break
+                    if hashtags_to_add:
+                        posts[-1] += "\n\r" + " ".join(hashtags_to_add)
+                else:
+                    posts.append(post) #if it is the first post, just add it
         # Otherwise it is split further
         else:
             posts += split_paragraphs(post, max_chars)
