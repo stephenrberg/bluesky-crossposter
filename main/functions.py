@@ -185,4 +185,11 @@ def split_words(text, max_chars):
         i = o
     return posts
 
+def remove_sky_hashtags(text):
+  # This regex pattern looks for a '#' followed by one or more word characters (letters, numbers, underscores)
+  # that end with "sky", ensuring a word boundary after "sky" to avoid matching
+  # substrings like "skylab". It's also case-insensitive.
+  pattern = r'#\w*sky\b'
+  return re.sub(pattern, '', text, flags=re.IGNORECASE)
+
 

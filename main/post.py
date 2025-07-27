@@ -1,5 +1,5 @@
 from copy import deepcopy
-from main.functions import logger, split_text
+from main.functions import logger, split_text, remove_sky_hashtags
 from settings.paths import image_path
 import random, string, urllib, requests
 import settings.settings as settings
@@ -51,6 +51,11 @@ class Post():
         # Allowing for an addiction to be made, since sometimes Mastodon adds a quoted post as a url
         text = deepcopy(self.info["text"]) + addition
         text = self.shorten_urls(text, service)
+
+        #if the service is not bluesky, remove any hashtags that end in sky
+        if service != "bluesky":
+            text = remove_sky_hashtags(text)
+
         # Turning string into a list of strings short enough to fit the target service
         posts = split_text(text, self.service_parameters[service]["post_length"])
         for i, text in enumerate(posts):
