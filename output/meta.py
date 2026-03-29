@@ -1,0 +1,357 @@
+import boto3
+import os
+import requests
+import time
+import glob
+import re
+from PIL import Image, ImageOps
+from settings import auth
+from settings.paths import image_path
+from main.functions import logger, split_text, remove_sky_hashtags
+from main.db import database
+
+# --- CLOUDFLARE R2 CONFIG ---
+R2_CLIENT = boto3.client(
+    service_name='s3',
+    endpoint_url=f'https://{auth.R2_ACCOUNT_ID}.r2.cloudflarestorage.com',
+    aws_access_key_id=auth.R2_ACCESS_KEY,
+    aws_secret_access_key=auth.R2_SECRET_KEY,
+    region_name='auto'
+)
+BUCKET_NAME = auth.R2_BUCKET_NAME
+PUBLIC_URL_BASE = auth.R2_PUBLIC_URL.rstrip('/')
+
+def process_threads_hashtags(text):
+    if not text:
+        return ""
+
+    # 1. Identify all hashtags
+    tags_found = list(re.finditer(r'#(\w+)', text))
+    if not tags_found:
+        return text.strip()
+
+    # 2. Determine Trailing Cluster (now allows for a URL at the very end)
+    # This matches: [optional space] [one or more hashtags] [optional space] [optional URL]
+    trailing_pattern = r'((?:\s*#\w+)+)\s*(https?://\S+)?\s*$'
+    trailing_match = re.search(trailing_pattern, text)
+    
+    trailing_tags_str = ""
+    url_at_end = ""
+    
+    if trailing_match:
+        trailing_tags_str = trailing_match.group(1) # The cluster of #tags
+        url_at_end = trailing_match.group(2) or "" # The URL (if present)
+
+    trailing_tags = re.findall(r'#\w+', trailing_tags_str)
+
+    # 3. Define the Topic (Priority: In-sentence tag > First trailing tag)
+    body_tags = [t.group(0) for t in tags_found if t.group(0) not in trailing_tags]
+    topic_tag = body_tags[0] if body_tags else (trailing_tags[0] if trailing_tags else tags_found[0].group(0))
+
+    # 4. Cleanup the Trailing Cluster but keep the URL
+    if trailing_tags_str:
+        # Cut off the tags and the URL, but we'll add the URL back later
+        text = text[:trailing_match.start()].rstrip()
+
+    # 5. Deduplication & One-Tag Rule
+    # We replace EVERY hashtag we find. If it's the topic_tag, we only keep the FIRST one we see.
+    topic_kept = False
+    def dedupe_and_remove(match):
+        nonlocal topic_kept
+        found_tag = match.group(0)
+        if found_tag == topic_tag and not topic_kept:
+            topic_kept = True
+            return found_tag
+        return ""
+
+    cleaned_text = re.sub(r'#\w+', dedupe_and_remove, text)
+
+    # 6. Re-attach Topic/URL
+    # If the topic was never "kept" (meaning it was only in the trailing cluster)
+    if not topic_kept:
+        cleaned_text = cleaned_text.rstrip() + f"\n\n{topic_tag}"
+    
+    # If there was a Letterboxd URL, put it back at the very end
+    if url_at_end:
+        cleaned_text = cleaned_text.rstrip() + f"\n\n{url_at_end}"
+
+    # Final polish
+    cleaned_text = re.sub(r' +', ' ', cleaned_text)
+    return cleaned_text.strip()
+
+def get_dominant_color(img):
+    """Returns the most frequent color in the image as an (R, G, B) tuple."""
+    try:
+        # Resize down to speed up color counting
+        small_img = img.resize((50, 50))
+        result = small_img.convert('P', palette=Image.ADAPTIVE, colors=1)
+        result = result.convert('RGB')
+        return result.getpixel((0, 0))
+    except Exception:
+        return (255, 255, 255) # Fallback to white
+
+def process_image_for_instagram(local_path):
+    """Resizes/Pads images safely using os.path logic."""
+    try:
+        if local_path.lower().endswith((".mp4", ".mov")):
+            return local_path 
+
+        with Image.open(local_path) as img:
+            img.load() # Ensure the image is actually loaded into memory
+            
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+                
+            width, height = img.size
+            aspect_ratio = width / height
+
+            targets = [
+                {"name": "square", "ratio": 1.0, "size": (1080, 1080)},
+                {"name": "portrait", "ratio": 0.8, "size": (1080, 1350)},
+                {"name": "landscape", "ratio": 1.91, "size": (1080, 566)}
+            ]
+
+            best_target = min(targets, key=lambda x: abs(x["ratio"] - aspect_ratio))
+            target_size = best_target["size"]
+
+            padding_color = get_dominant_color(img)
+            
+            # Apply padding
+            new_img = ImageOps.pad(img, target_size, color=padding_color, centering=(0.5, 0.5))
+            
+            # --- FIXED PATH LOGIC ---
+            # Splits '/path/to/image.jpg' into ('/path/to/image', '.jpg')
+            base_path, ext = os.path.splitext(local_path)
+            processed_path = f"{base_path}_processed{ext}"
+            
+            new_img.save(processed_path, "JPEG", quality=95)
+            logger.info(f"Successfully processed: {processed_path}")
+            return processed_path
+
+    except Exception as e:
+        logger.error(f"Image processing failed: {e}")
+        return local_path
+
+def upload_to_r2(local_path):
+    filename = os.path.basename(local_path)
+    try:
+        content_type = "video/mp4" if filename.lower().endswith(".mp4") else "image/jpeg"
+        # Reverting to the simpler upload_file method
+        R2_CLIENT.upload_file(
+            local_path, 
+            BUCKET_NAME, 
+            filename,
+            ExtraArgs={'ContentType': content_type}
+        )
+        url = f"{PUBLIC_URL_BASE}/{filename}"
+        logger.info(f"Verified R2 Upload: {url}")
+        return url
+    except Exception as e:
+        logger.error(f"R2 Upload failed: {e}")
+        return None
+
+def output(platform, queue_items):
+    image_dir = image_path 
+
+    for item in queue_items:
+        source_post = item["post"]
+        post_id = item["id"] 
+        public_urls = []
+        is_video = False
+        temp_files = []
+
+        parent_meta_id = database.get_id(source_post.info.get("reply_id"), platform)
+        if platform == "instagram" and source_post.info.get("reply_id"):
+            logger.info(f"Skipping Instagram for {post_id}: Instagram does not support threads.")
+            database.update(post_id, platform, "skipped")
+            database.save()
+            continue
+
+        if platform == "threads" and source_post.info.get("reply_id") and not parent_meta_id:
+            logger.info(f"Threads: Parent {source_post.info['reply_id']} not found yet. Waiting...")
+            continue # Leave in queue for next run
+
+        raw_text = source_post.info.get("text", "")
+        
+        if platform == "threads":
+            # Apply the logic to find 1 topic tag and clean the rest
+            post_text = process_threads_hashtags(raw_text)
+        else:
+            # Use your standard hashtag remover for Instagram/others
+            post_text = remove_sky_hashtags(raw_text)
+
+        if platform == "instagram" and not source_post.info.get('media'):
+            logger.info(f"Skipping Instagram: Post ID {post_id} is text-only.")
+            # Mark as skipped or success in DB so it doesn't keep retrying
+            database.update(post_id, platform, "skipped") 
+            database.save()
+            continue
+      
+        logger.info(f"Posting \"{post_text}\" to {platform}")
+
+        if source_post.info.get('media'):
+            all_files = glob.glob(os.path.join(image_dir, "*"))
+            print(f"DEBUG: Looking for ID: {post_id}")
+            print(f"DEBUG: First file in folder: {os.path.basename(all_files[0]) if all_files else 'FOLDER EMPTY'}")
+            this_post_files = [f for f in all_files if str(post_id) in os.path.basename(f)]
+            
+            if not this_post_files:
+                logger.error(f"Media expected but not found for ID {post_id}")
+                continue
+            
+            if not this_post_files:
+                logger.error(f"CRITICAL: No media files found matching Post ID {post_id}. Skipping post.")
+                continue # Skip to the next post in the queue
+
+            for path in this_post_files:
+                work_path = path
+                
+                # Only process if it's Instagram and not a video
+                if platform == "instagram" and not path.lower().endswith((".mp4", ".mov")):
+                    work_path = process_image_for_instagram(path)
+                    # If process_image_for_instagram created a new file, track it for deletion
+                    if work_path != path:
+                        temp_files.append(work_path)
+
+                r2_url = upload_to_r2(work_path)
+                if r2_url:
+                    public_urls.append(r2_url)
+                    if path.lower().endswith((".mp4", ".mov")):
+                        is_video = True
+        
+        # 2. Publish logic
+        success, new_meta_id = publish_to_meta(platform, post_text, public_urls, is_video, reply_id=parent_meta_id)
+        
+        # --- CLEANUP PROCESSED FILES ---
+        for f in temp_files:
+            try:
+                if os.path.exists(f):
+                    os.remove(f)
+                    logger.info(f"Cleaned up temp file: {f}")
+            except Exception as e:
+                logger.error(f"Failed to delete temp file {f}: {e}")
+        
+        if success:
+            database.update(post_id, platform, new_meta_id)
+            database.save() 
+        else:
+            logger.error(f"Failed to post to {platform}")
+
+def publish_to_meta(platform, text, media_urls, is_video, reply_id=None):
+    if not media_urls and platform == "instagram":
+        return False, None
+
+    token = auth.IG_ACCESS_TOKEN if platform == "instagram" else auth.THREADS_ACCESS_TOKEN
+    user_id = auth.IG_USER_ID if platform == "instagram" else auth.THREADS_USER_ID
+    
+    if platform == "instagram":
+        base = f"https://graph.facebook.com/v21.0/{user_id}/media"
+        pub = f"https://graph.facebook.com/v21.0/{user_id}/media_publish"
+        text_key = 'caption'
+    else:
+        base = f"https://graph.threads.net/v1.0/{user_id}/threads"
+        pub = f"https://graph.threads.net/v1.0/{user_id}/threads_publish"
+        text_key = 'text'
+
+    # --- CAROUSEL LOGIC (Multiple Images) ---
+    if len(media_urls) > 1 and not is_video:
+        child_ids = []
+        logger.info(f"Creating carousel with {len(media_urls)} images...")
+        
+        for url in media_urls:
+            child_payload = {
+                'access_token': token,
+                'image_url': url,
+                'media_type': 'IMAGE',  # <--- Added the missing comma here
+            }
+
+            # Instagram needs this flag; Threads does not (and might error if it's there)
+            if platform == "instagram":
+                child_payload['is_carousel_item'] = 'true'
+              
+            res = requests.post(base, data=child_payload).json()
+            child_id = res.get('id')
+            if child_id:
+                child_ids.append(child_id)
+            else:
+                logger.error(f"Failed to create child container for {url}: {res}")
+
+        if len(child_ids) < len(media_urls):
+            logger.error("Not all images were processed. Aborting carousel.")
+            return False, None
+
+        # Create the Parent Container
+        payload = {
+            'access_token': token,
+            'media_type': 'CAROUSEL',
+            'children': ','.join(child_ids),
+            text_key: text
+        }
+    
+    # --- SINGLE VIDEO LOGIC ---
+    elif is_video and media_urls:
+        video_url = [u for u in media_urls if ".mp4" in u.lower()][0]
+        payload = {
+            'access_token': token, 
+            text_key: text,
+            'media_type': 'REELS' if platform == "instagram" else 'VIDEO',
+            'video_url': video_url
+        }
+
+    # --- SINGLE IMAGE LOGIC ---
+    elif media_urls:
+        payload = {
+            'access_token': token, 
+            text_key: text,
+            'media_type': 'IMAGE', 
+            'image_url': media_urls[0]
+        }
+    
+    # --- TEXT ONLY ---
+    else:
+        payload = {'access_token': token, text_key: text, 'media_type': 'TEXT'}
+
+    if platform == "threads" and reply_id:
+        payload['reply_to_id'] = reply_id
+
+    # 1. Create Main Container
+    res = requests.post(base, data=payload).json()
+    container_id = res.get('id')
+    if not container_id:
+        logger.error(f"META API ERROR: {res}")
+        return False, None
+
+    # --- PROCESSING WAIT ---
+    if platform == 'threads':
+        wait_time = 150 if is_video else (60 + (len(media_urls) - 1) * 10)
+        logger.info(f"Threads container {container_id} created. Waiting {wait_time}s...")
+        time.sleep(wait_time)
+    else:
+        # Polling Instagram
+        max_retries = 20
+        for i in range(max_retries):
+            status_url = f"https://graph.facebook.com/v21.0/{container_id}"
+            status_res = requests.get(status_url, params={'fields': 'status_code', 'access_token': token}).json()
+            status = status_res.get('status_code')
+            logger.info(f"Instagram status for {container_id}: {status}")
+
+            if status == "FINISHED":
+                break
+            elif status == "ERROR":
+                logger.error(f"Instagram reports container error: {status_res}")
+                return False, None
+            time.sleep(20)
+        else:
+            logger.error(f"Instagram timed out waiting for container {container_id}")
+            return False, None
+
+    # 2. Final Publish
+    final = requests.post(pub, data={'creation_id': container_id, 'access_token': token})
+    
+    if final.status_code == 200:
+        published_meta_id = final.json().get('id')
+        logger.info(f"Successfully posted to {platform}: {published_meta_id}")
+        return True, published_meta_id
+    else:
+        logger.error(f"Final {platform} Publish Failed: {final.json()}")
+        return False, None

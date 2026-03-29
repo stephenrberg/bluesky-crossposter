@@ -186,10 +186,16 @@ def split_words(text, max_chars):
     return posts
 
 def remove_sky_hashtags(text):
-  # This regex pattern looks for a '#' followed by one or more word characters (letters, numbers, underscores)
-  # that end with "sky", ensuring a word boundary after "sky" to avoid matching
-  # substrings like "skylab". It's also case-insensitive.
-  pattern = r'#\w*sky\b'
-  return re.sub(pattern, '', text, flags=re.IGNORECASE)
+    # This pattern matches the hashtag AND an optional single space immediately following it
+    # \b ensures we don't match 'skylab'
+    # \s? matches zero or one space
+    pattern = r'#\w*sky\b\s?'
+    
+    # We replace the tag + its trailing space with nothing
+    cleaned = re.sub(pattern, '', text, flags=re.IGNORECASE)
+    
+    # Finally, we strip only the ends of the string to avoid 
+    # a leading/trailing space if the tag was at the start/end.
+    return cleaned.strip()
 
 

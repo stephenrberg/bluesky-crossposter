@@ -21,6 +21,17 @@ TWITTER_APP_KEY = ""
 TWITTER_APP_SECRET = ""
 TWITTER_ACCESS_TOKEN = ""
 TWITTER_ACCESS_TOKEN_SECRET = ""
+# Facebook stuff
+IG_USER_ID = ""
+IG_ACCESS_TOKEN = ""
+THREADS_USER_ID = ""
+THREADS_ACCESS_TOKEN = ""
+# s3 bucket
+R2_ACCOUNT_ID = ""
+R2_ACCESS_KEY = ""
+R2_SECRET_KEY = ""
+R2_BUCKET_NAME = ""
+R2_PUBLIC_URL = "" # Found in bucket settings
 
 # Override settings with environment variables if they exist
 BSKY_HANDLE = os.environ.get('BSKY_HANDLE') if os.environ.get('BSKY_HANDLE') else BSKY_HANDLE

@@ -73,7 +73,8 @@ class Post():
     def get_images(self):
         for image in self.info["media"]["items"]:
             # Giving the image just a random filename
-            filename = ''.join(random.choice(string.ascii_lowercase) for i in range(10)) + ".jpg"
+            random_str = ''.join(random.choice(string.ascii_lowercase) for i in range(10))
+            filename = f"{self.info['post_id']}_{random_str}.jpg"
             filename = image_path + filename
             # Downloading fullsize version of image
             urllib.request.urlretrieve(image["url"], filename)
@@ -88,7 +89,8 @@ class Post():
     def get_video(self):
         for video in self.info["media"]["items"]:
             # Giving the video just a random filename
-            filename = ''.join(random.choice(string.ascii_lowercase) for i in range(10)) + ".mp4"
+            random_str = ''.join(random.choice(string.ascii_lowercase) for i in range(10))
+            filename = f"{self.info['post_id']}_{random_str}.mp4"
             filename = image_path + filename
             response = requests.get(video["url"])
             if response.status_code != 200:

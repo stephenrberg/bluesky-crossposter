@@ -8,8 +8,8 @@ from main.functions import logger
 
 # Post database class
 class Database():
-    # A list of all available services
-    services = ["bluesky", "mastodon", "twitter"]
+    # Updated to include new Meta services
+    services = ["bluesky", "mastodon", "twitter", "instagram", "threads"]
 
     def __init__(self):
         # This tracks if there have been updates to the database this run, and if not the database is not resaved at the end
@@ -24,10 +24,16 @@ class Database():
     def get_id(self, origin_id, service):
         if not origin_id or origin_id not in self.post_list:
             return None
-        id = self.post_list[origin_id]["services"][service]["id"]
+        
+        # Defensive check for missing service keys in old records
+        service_data = self.post_list[origin_id]["services"].get(service)
+        if not service_data:
+            return None
+            
+        id = service_data["id"]
         # For bluesky the uri is also needed in order to repost and respond.
         if service == "bluesky": 
-            uri = self.post_list[origin_id]["services"][service]["uri"]
+            uri = service_data.get("uri", "")
             return id, uri
         return id
 
@@ -38,26 +44,41 @@ class Database():
         db_data = []
         if not os.path.exists(database_path):
             return
-        file = open(database_path, 'r')
-        for line in file:
-            try:
-                db_data.append(json.loads(line))
-            except:
-                continue
-        file.close()
+        
+        with open(database_path, 'r') as file:
+            for line in file:
+                try:
+                    db_data.append(json.loads(line))
+                except:
+                    continue
+
         # If the database doesn't contain the origin field, this means it is
         # still in the old format and needs to be converted.
-        if "origin" not in db_data[0]:
+        if db_data and "origin" not in db_data[0]:
             logger.info("Updating database.")
             self.convert_db(db_data)
             return
+
         for line in db_data:
-            # Setting the identifying id to the ID relating to the current input source, unless the post has not been
-            # posted to that service, in which case the ID from the posts origin will be used.
-            if line["services"][settings.input_source]["id"] not in ["skipped", "FailedToPost", "duplicate", ""]:
-                self.post_list[str(line["services"][settings.input_source]["id"])] = line
+            # --- AUTO-MIGRATION LOGIC ---
+            # Ensure legacy entries have keys for all current services
+            for service in self.services:
+                if service not in line["services"]:
+                    # Defaulting to 'skipped' for old posts to prevent mass reposting
+                    line["services"][service] = {
+                        "id": "skipped",
+                        "failure": 0
+                    }
+                    if service == "bluesky":
+                        line["services"][service]["uri"] = ""
+
+            # Setting the identifying id to the ID relating to the current input source
+            input_id = str(line["services"][settings.input_source]["id"])
+            if input_id not in ["skipped", "FailedToPost", "duplicate", ""]:
+                self.post_list[input_id] = line
             else:
-                self.post_list[str(line["services"][line["origin"]]["id"])] = line
+                origin_id = str(line["services"][line["origin"]]["id"])
+                self.post_list[origin_id] = line
 
     # Checking if an ID exists in the database (adding if not), and if so, if it has already been posted to all required outputs.
     def posted(self, id, services = [], uri = None):
@@ -75,10 +96,17 @@ class Database():
             services = self.outputs
         for service in services:
             logger.info(f"Checking if {id} has been posted to {service}")
-            logger.debug(self.post_list[id]["services"][service]["id"])
-            if settings.outputs[service] and not self.post_list[id]["services"][service]["id"]:
+            
+            # DEFENSIVE: Use .get() to avoid KeyError on legacy database entries
+            service_data = self.post_list[id]["services"].get(service)
+            if not service_data:
+                logger.info(f"Service {service} not found in database for post {id}. Marking as not posted.")
                 return False
-            if self.post_list[id]["services"][service]["id"] == "FailedToPost":
+
+            logger.debug(service_data["id"])
+            if settings.outputs.get(service) and not service_data["id"]:
+                return False
+            if service_data["id"] == "FailedToPost":
                 logger.info(f"{id} has reached error limit for {service}.")
             else:
                 logger.info(f"{id} has already been posted to {service}.")
@@ -91,7 +119,10 @@ class Database():
             services = self.outputs
         # Only if all services has been skipped or failed, returns True
         for service in services:
-            if not self.post_list[id]["services"][service]["id"] or self.post_list[id]["services"][service]["id"] not in ["skipped", "FailedToPost", "duplicate"]:
+            service_data = self.post_list[id]["services"].get(service)
+            if not service_data:
+                return False
+            if not service_data["id"] or service_data["id"] not in ["skipped", "FailedToPost", "duplicate"]:
                 return False
         return True
 
@@ -106,34 +137,42 @@ class Database():
         # Setting the ID of the post from the input source
         self.post_list[id]["services"][settings.input_source]["id"] = id
         # Adding uri if applicable. This only applies for Bluesky
-        if uri:
+        if uri and "bluesky" in self.post_list[id]["services"]:
             self.post_list[id]["services"]["bluesky"]["uri"] = uri
         # For any service that is not the input, and not included in active outputs, setting the id to "skipped"
         for service in self.post_list[id]["services"]:
-            if service != settings.input_source and settings.outputs[service] == False:
+            if service != settings.input_source and settings.outputs.get(service) == False:
                 self.post_list[id]["services"][service]["id"] = "skipped"
 
     # Removing post from db and cache
     def remove(self, id):
         logger.info(f"Deleting post {id} from database.")
-        del self.post_list[id]
-        del self.cache[id]
+        if id in self.post_list:
+            del self.post_list[id]
+        if id in self.cache:
+            del self.cache[id]
 
     # Updating database and cache when a post is sent
     def update(self, input_id, service, output_id = None, uri = None):
+        input_id = str(input_id)
+        if input_id not in self.post_list:
+             return
+             
         # For reposts no new output_id is given, only the cache is updated
-        if output_id:
-            self.post_list[str(input_id)]["services"][service]["id"] = output_id
-        if uri:
+        if output_id and service in self.post_list[input_id]["services"]:
+            self.post_list[input_id]["services"][service]["id"] = output_id
+        if uri and service in self.post_list[input_id]["services"]:
             self.post_list[input_id]["services"][service]["uri"] = uri
-        self.cache[str(input_id)] = arrow.utcnow()
+        self.cache[input_id] = arrow.utcnow()
         self.updated = True
 
     # Setting a post for a service to skipped
     def skip(self, id, service):
-        if not self.post_list[str(id)]["services"][service]["id"]:
-            self.updated = True
-            self.post_list[str(id)]["services"][service]["id"] = "skipped"
+        id = str(id)
+        if id in self.post_list and service in self.post_list[id]["services"]:
+            if not self.post_list[id]["services"][service]["id"]:
+                self.updated = True
+                self.post_list[id]["services"][service]["id"] = "skipped"
 
     #  Saving database to file
     def save(self):
@@ -149,9 +188,10 @@ class Database():
 
     # If a post failed to send, increasing the failure counter for that service. If it reaches the max_retries-limit, setting the post ID to "FailedToPost"
     def failed_post(self, id, service):
-        self.post_list[id]["services"][service]["failure"] += 1
-        if self.post_list[id]["services"][service]["failure"] >= settings.max_retries:
-            self.post_list[id]["services"][service]["id"] = "FailedToPost"
+        if id in self.post_list and service in self.post_list[id]["services"]:
+            self.post_list[id]["services"][service]["failure"] += 1
+            if self.post_list[id]["services"][service]["failure"] >= settings.max_retries:
+                self.post_list[id]["services"][service]["id"] = "FailedToPost"
 
 
     # Reading cache-file

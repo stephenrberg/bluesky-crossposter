@@ -3,7 +3,7 @@ services:
   crossposter:
     build: .
     image: ghcr.io/linus2punkt0/bluesky-crossposter:latest
-    restart: always
+    restart: unless-stopped
     environment:
       BSKY_HANDLE:
       BSKY_PASSWORD:
@@ -36,7 +36,8 @@ services:
       ALLOW_REPLY:
       PRIVACY:
       # job interval, defaults to 1 hour(the max lag between bluesky and twitter/mastodon)
-      RUN_INTERVAL: ${RUN_INTERVAL:-3600}
+      RUN_INTERVAL: ${RUN_INTERVAL:-900}
     volumes:
       - ./dbhost:/db
       - ./backup:/backup
+    restart: unless-stopped
