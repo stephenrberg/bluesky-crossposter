@@ -11,15 +11,25 @@ from main.functions import logger, split_text, remove_sky_hashtags
 from main.db import database
 
 # --- CLOUDFLARE R2 CONFIG ---
-R2_CLIENT = boto3.client(
-    service_name='s3',
-    endpoint_url=f'https://{auth.R2_ACCOUNT_ID}.r2.cloudflarestorage.com',
-    aws_access_key_id=auth.R2_ACCESS_KEY,
-    aws_secret_access_key=auth.R2_SECRET_KEY,
-    region_name='auto'
+
+# R2_CLIENT = boto3.client(
+#     service_name='s3',
+#     endpoint_url=f'https://{auth.R2_ACCOUNT_ID}.r2.cloudflarestorage.com',
+#     aws_access_key_id=auth.R2_ACCESS_KEY,
+#     aws_secret_access_key=auth.R2_SECRET_KEY,
+#     region_name='auto'
+# )
+
+S3_CLIENT = boto3.client(
+    's3',
+    region_name=auth.S3_REGION,
+    aws_access_key_id=auth.S3_ACCESS_KEY,
+    aws_secret_access_key=auth.S3_SECRET_KEY
 )
-BUCKET_NAME = auth.R2_BUCKET_NAME
-PUBLIC_URL_BASE = auth.R2_PUBLIC_URL.rstrip('/')
+
+
+# BUCKET_NAME = auth.R2_BUCKET_NAME
+# PUBLIC_URL_BASE = auth.R2_PUBLIC_URL.rstrip('/')
 
 def process_threads_hashtags(text):
     if not text:
@@ -132,22 +142,42 @@ def process_image_for_instagram(local_path):
         logger.error(f"Image processing failed: {e}")
         return local_path
 
-def upload_to_r2(local_path):
-    filename = os.path.basename(local_path)
+# def upload_to_r2(local_path):
+#     filename = os.path.basename(local_path)
+#     try:
+#         content_type = "video/mp4" if filename.lower().endswith(".mp4") else "image/jpeg"
+#         # Reverting to the simpler upload_file method
+#         R2_CLIENT.upload_file(
+#             local_path, 
+#             BUCKET_NAME, 
+#             filename,
+#             ExtraArgs={'ContentType': content_type}
+#         )
+#         url = f"{PUBLIC_URL_BASE}/{filename}"
+#         logger.info(f"Verified R2 Upload: {url}")
+#         return url
+#     except Exception as e:
+#         logger.error(f"R2 Upload failed: {e}")
+#         return None
+
+def upload_to_s3(file_path):
+    # Use the filename as the object name in S3
+    filename = os.path.basename(file_path)
+    
+    # Correctly identify content type for Meta's ingest bot
+    content_type = "video/mp4" if filename.lower().endswith((".mp4", ".mov")) else "image/jpeg"
+    
     try:
-        content_type = "video/mp4" if filename.lower().endswith(".mp4") else "image/jpeg"
-        # Reverting to the simpler upload_file method
-        R2_CLIENT.upload_file(
-            local_path, 
-            BUCKET_NAME, 
+        S3_CLIENT.upload_file(
+            file_path, 
+            auth.S3_BUCKET_NAME, # Pull from your settings
             filename,
             ExtraArgs={'ContentType': content_type}
         )
-        url = f"{PUBLIC_URL_BASE}/{filename}"
-        logger.info(f"Verified R2 Upload: {url}")
-        return url
+        # Ensure the URL matches your region
+        return f"https://{auth.S3_BUCKET_NAME}.s3.{auth.S3_REGION}.amazonaws.com/{filename}"
     except Exception as e:
-        logger.error(f"R2 Upload failed: {e}")
+        logger.error(f"S3 Upload failed: {e}")
         return None
 
 def output(platform, queue_items):
@@ -213,9 +243,9 @@ def output(platform, queue_items):
                     if work_path != path:
                         temp_files.append(work_path)
 
-                r2_url = upload_to_r2(work_path)
-                if r2_url:
-                    public_urls.append(r2_url)
+                content_url = upload_to_s3(work_path)
+                if content_url:
+                    public_urls.append(content_url)
                     if path.lower().endswith((".mp4", ".mov")):
                         is_video = True
         
@@ -262,7 +292,7 @@ def publish_to_meta(platform, text, media_urls, is_video, reply_id=None):
             child_payload = {
                 'access_token': token,
                 'image_url': url,
-                'media_type': 'IMAGE',  # <--- Added the missing comma here
+                'media_type': 'IMAGE'
             }
 
             # Instagram needs this flag; Threads does not (and might error if it's there)
