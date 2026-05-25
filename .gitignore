@@ -7,3 +7,4 @@ backups/*.bak*
 *.jpg
 *.cache
 settings/*.py
+cookies.json

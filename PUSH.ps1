@@ -13,7 +13,9 @@ $syncItems = @(
     "Dockerfile",
     "env.example",
     "README.md",
-    "requirements.txt"
+    "requirements.txt",
+    "crossposter.js",
+    "cookies.json"
 )
 
 if (docker ps -q -f name=$container) {

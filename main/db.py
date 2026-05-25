@@ -143,6 +143,8 @@ class Database():
         for service in self.post_list[id]["services"]:
             if service != settings.input_source and settings.outputs.get(service) == False:
                 self.post_list[id]["services"][service]["id"] = "skipped"
+        
+        self.save()
 
     # Removing post from db and cache
     def remove(self, id):
@@ -151,6 +153,7 @@ class Database():
             del self.post_list[id]
         if id in self.cache:
             del self.cache[id]
+        self.save()
 
     # Updating database and cache when a post is sent
     def update(self, input_id, service, output_id = None, uri = None):
@@ -165,6 +168,9 @@ class Database():
             self.post_list[input_id]["services"][service]["uri"] = uri
         self.cache[input_id] = arrow.utcnow()
         self.updated = True
+        
+        # *** AUTO-SAVE ON SUCCESSFUL POST ***
+        self.save()
 
     # Setting a post for a service to skipped
     def skip(self, id, service):
@@ -173,6 +179,7 @@ class Database():
             if not self.post_list[id]["services"][service]["id"]:
                 self.updated = True
                 self.post_list[id]["services"][service]["id"] = "skipped"
+                self.save()
 
     #  Saving database to file
     def save(self):
@@ -192,6 +199,8 @@ class Database():
             self.post_list[id]["services"][service]["failure"] += 1
             if self.post_list[id]["services"][service]["failure"] >= settings.max_retries:
                 self.post_list[id]["services"][service]["id"] = "FailedToPost"
+            
+            self.save()
 
 
     # Reading cache-file
@@ -294,6 +303,7 @@ class Database():
                                             "failure": line["failed"]["mastodon"],
                                         }
             self.post_list[post["services"][settings.input_source]["id"]] = post
+        self.save()
 
     # Dynamically creating empty entry for a post containing every available service
     def create_entry(self):

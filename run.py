@@ -7,7 +7,6 @@ def run():
     queues = get_posts()
     # If no new or deleted posts are found, we can skip further actions.
     if not new_posts(queues) and not database.deleted:
-        logger.info("No new posts or newly deleted posts found.")
         exit()
     logger.debug(f"Found posts {queues}")
     send_posts(queues)

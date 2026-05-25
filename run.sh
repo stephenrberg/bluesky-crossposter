@@ -1,7 +1,9 @@
 #!/bin/bash
 
-# Run once per hour if nothing else has been specified in environment variables
+BASE_DELAY=300
 while :; do
   python run.py
-  sleep 900
+  VARIANCE=$(( (RANDOM % 121) - 60 ))
+  SLEEP_SECS=$(( BASE_DELAY + VARIANCE ))
+  sleep $SLEEP_SECS
 done
