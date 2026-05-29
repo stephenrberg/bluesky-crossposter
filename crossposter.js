@@ -15,7 +15,6 @@ const path = require('path');
       '--disable-gpu', 
       '--disable-software-rasterizer',
       '--mute-audio',
-      // *** NEW MEMORY ENGINE MANAGEMENT FLAGS ***
       '--js-flags="--max-old-space-size=512"', // Strict limit constraints on active V8 memory footprint
       '--memory-pressure-threshold-ms=1',    // Forces real-time system garbage collection sweeps
       '--no-zygote',
@@ -42,9 +41,6 @@ const path = require('path');
     const cookies = JSON.parse(fs.readFileSync('./cookies.json', 'utf8'));
     await page.setCookie(...cookies);
 
-    // ==========================================
-    // BRANCH A: DEEP THREAD REPLY ENGINE
-    // ==========================================
     if (reply_id) {
         await page.goto(`https://x.com/i/status/${reply_id}`, { waitUntil: 'networkidle2' });
         let completeText = text + (quote_id ? ` \nhttps://x.com/i/status/${quote_id}` : '');
@@ -89,9 +85,6 @@ const path = require('path');
           }
         });
     } 
-    // ==========================================
-    // BRANCH B: STANDARD HOMEPAGE ROOT ENGINE
-    // ==========================================
     else {
         await page.goto('https://x.com/home', { waitUntil: 'domcontentloaded' });
         const editorSelector = '[data-testid="tweetTextarea_0"]';

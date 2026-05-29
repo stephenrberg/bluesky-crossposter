@@ -95,21 +95,16 @@ class Database():
         if not services:
             services = self.outputs
         for service in services:
-            logger.info(f"Checking if {id} has been posted to {service}")
-            
+
             # DEFENSIVE: Use .get() to avoid KeyError on legacy database entries
             service_data = self.post_list[id]["services"].get(service)
             if not service_data:
                 logger.info(f"Service {service} not found in database for post {id}. Marking as not posted.")
                 return False
-
-            logger.debug(service_data["id"])
             if settings.outputs.get(service) and not service_data["id"]:
                 return False
             if service_data["id"] == "FailedToPost":
                 logger.info(f"{id} has reached error limit for {service}.")
-            else:
-                logger.info(f"{id} has already been posted to {service}.")
         return True
     
     # Checking if a post has reached failure limit or has been skipped. 

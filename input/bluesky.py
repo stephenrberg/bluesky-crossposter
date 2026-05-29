@@ -12,7 +12,6 @@ from main.db import database
 
 def get_posts():
     bsky = bsky_connect()
-    logger.info("Gathering posts from Bluesky")
     posts = []
     # Getting feed of user
     profile_feed = bsky.app.bsky.feed.get_author_feed({'actor': BSKY_HANDLE})
@@ -21,28 +20,22 @@ def get_posts():
         uri = status.post.uri
         # If the post was not written by the account that posted it, it is a repost from another account and is skipped.
         if status.post.author.handle != BSKY_HANDLE:
-            logger.info(f'Post {post_id} is a repost of another account: ({status.post.author.handle}).')
             continue
         # Checking if the post has "indexe_at" set, meaning it is a repost.
         repost = False
         created_at = get_date(status.post.record.created_at.split(".")[0])
-        logger.debug(f'Post created at: {created_at}')
         if hasattr(status.reason, "indexed_at"):
             repost = True
             created_at = get_date(status.reason.indexed_at.split(".")[0])
         # Checking if post is outside time limit
         if not created_at > database.get_post_time_limit():
-            logger.info(f'Post {post_id} posted outside time limit.')
             continue
         # Checking if the status has already been posted to all required services (as well as adding it to the database)
         if database.posted(post_id, uri = uri) and not repost:
-            logger.info(f'Post {post_id} already posted to all required services')
             continue
         # Checking if this is a repost of a post that can't be reposted because it has previously failed of been skipped
         if repost and database.not_posted(post_id):
-            logger.info(f'Post {post_id} is a repost of a post that has previously failed or been skipped.')
             continue
-        logger.debug(status)
         # Facets contains things like urls and mentions, which need to be deal with.
         # send_mention is used to keep track of if the mention-settings says for the post to be posted or not.
         # Default is True, because if nobody is mentioned it should be posted.
@@ -61,7 +54,6 @@ def get_posts():
             text += '\n'+status.post.embed.external.uri
             urls.append(status.post.embed.external.uri)
         if mentioned_users and settings.mentions == "skip":
-            logger.info(f'post {status.id} mentions a user, crossposter has been set to skip posts including mentions.')
             continue
         # Setting reply_to_user to the same as user handle and only changing it if the post is an actual reply.
         # Later a check is performed to if the variable is the same as the user handle, so only
@@ -80,7 +72,6 @@ def get_posts():
                 reply_to_user = bsky.get_reply_to_user(status.post.record.reply.parent)
         # If post is a reply to another user, it is skipped
         if reply_to_user != BSKY_HANDLE:
-            logger.info(f"Post {post_id} is a reply to another account ({reply_to_user}).")
             continue
         quoted_id = ""
         quote_url = ""
