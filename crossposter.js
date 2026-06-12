@@ -38,7 +38,15 @@ const path = require('path');
   });
 
   try {
-    const cookies = JSON.parse(fs.readFileSync('./cookies.json', 'utf8'));
+    const rawCookies = JSON.parse(fs.readFileSync('./cookies.json', 'utf8'));
+    
+    const cookies = rawCookies.map(cookie => {
+      if (cookie.partitionKey && typeof cookie.partitionKey === 'string') {
+        delete cookie.partitionKey;
+      }
+      return cookie;
+    });
+
     await page.setCookie(...cookies);
 
     if (reply_id) {
