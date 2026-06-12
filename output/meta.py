@@ -9,6 +9,7 @@ from settings import auth
 from settings.paths import image_path
 from main.functions import logger, split_text, remove_sky_hashtags
 from main.db import database
+from main.alerts import send_failure_alert
 
 # --- CLOUDFLARE R2 CONFIG ---
 
@@ -266,6 +267,7 @@ def output(platform, queue_items):
             database.save() 
         else:
             logger.error(f"Failed to post to {platform}")
+            send_failure_alert(platform, f"Failed to post to {platform}")
 
 def publish_to_meta(platform, text, media_urls, is_video, reply_id=None):
     if not media_urls and platform == "instagram":

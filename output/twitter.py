@@ -7,6 +7,7 @@ from main.functions import logger
 from settings.auth import *
 from settings import settings
 from main.db import database
+from main.alerts import send_failure_alert
 
 # Function for processing output queue
 def output(queue):
@@ -23,6 +24,7 @@ def output(queue):
             database.failed_post(item["id"], "twitter")
             logger.error(f"Failed to post {item['id']}: {e}")
             logger.debug(traceback.format_exc())
+            send_failure_alert("Twitter", e)
         
         index = index +1
         if index < total_items:

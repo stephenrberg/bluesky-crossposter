@@ -4,6 +4,7 @@ from main.connections import mastodon_connect
 from settings.auth import MASTODON_HANDLE, MASTODON_INSTANCE
 from settings import settings
 from main.db import database
+from main.alerts import send_failure_alert
 
 
 # Function for processing output queue
@@ -18,6 +19,8 @@ def output(queue):
             database.failed_post(item["id"], "mastodon")
             logger.error(f"Failed to post {item['id']}: {e}")
             logger.debug(traceback.format_exc())
+            send_failure_alert("Mastodon", e)
+
 
 # Function for reposting posts.
 def repost(item):
