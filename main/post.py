@@ -34,6 +34,10 @@ class Post():
             "post_length": 300,
             "url_length": 29
         },
+        "tumblr": {
+            "post_length": 4096, # Tumblr text posts have practically infinite limits, but 4096 is a safe chunking cap
+            "url_length": 23   
+        }
     }
 
     def __init__(self, post_info):

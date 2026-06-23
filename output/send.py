@@ -1,5 +1,5 @@
 from settings import settings
-from output import twitter, mastodon, bluesky, meta
+from output import twitter, mastodon, bluesky, meta, tumblr
 from main.db import database
 
 # Function for processing post queue
@@ -8,7 +8,6 @@ def send_posts(queues):
     for service in queues:
         if not queues[service]:
             continue
-            
         if service == "bluesky":
             bluesky.output(queues[service])
         elif service == "mastodon":
@@ -20,6 +19,8 @@ def send_posts(queues):
             meta.output("instagram", queues[service])
         elif service == "threads":
             meta.output("threads", queues[service])
+        elif service == "tumblr":
+            tumblr.output(queues[service])
 
     # Running through and deleting deleted posts
     for id in database.deleted:
@@ -30,4 +31,6 @@ def send_posts(queues):
         if settings.outputs["bluesky"] and settings.input_source != "bluesky" and database.get_id(id, "bluesky"):
             bluesky.delete_post(id)
         # Note: Threads and Instagram APIs generally don't support deleting via API for 3rd party apps yet
+        if settings.outputs["tumblr"] and settings.input_source != "tumblr" and database.get_id(id, "tumblr"):
+            tumblr.delete_post(id)
         database.remove(id)

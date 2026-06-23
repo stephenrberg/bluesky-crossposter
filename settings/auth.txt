@@ -35,7 +35,12 @@ R2_PUBLIC_URL = "" # Found in bucket settings
 # pushover
 PUSHOVER_TOKEN = ""
 PUSHOVER_USER = ""
-
+# tumblr
+TUMBLR_BLOG_NAME = ""
+TUMBLR_CONSUMER_KEY = ""
+TUMBLR_CONSUMER_SECRET = "" 
+TUMBLR_OAUTH_TOKEN = ""
+TUMBLR_OAUTH_SECRET = ""
 # Override settings with environment variables if they exist
 BSKY_HANDLE = os.environ.get('BSKY_HANDLE') if os.environ.get('BSKY_HANDLE') else BSKY_HANDLE
 BSKY_PASSWORD = os.environ.get('BSKY_PASSWORD') if os.environ.get('BSKY_PASSWORD') else BSKY_PASSWORD

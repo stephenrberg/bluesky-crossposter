@@ -9,7 +9,7 @@ from main.functions import logger
 # Post database class
 class Database():
     # Updated to include new Meta services
-    services = ["bluesky", "mastodon", "twitter", "instagram", "threads"]
+    services = ["bluesky", "mastodon", "twitter", "instagram", "threads", "tumblr"]
 
     def __init__(self):
         # This tracks if there have been updates to the database this run, and if not the database is not resaved at the end

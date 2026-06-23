@@ -1,6 +1,7 @@
 import tweepy, traceback
 from mastodon import Mastodon
 from atproto import Client, Session, SessionEvent
+from pytumblr import TumblrRestClient
 from main.functions import logger
 from settings.auth import *
 from settings.paths import session_cache_path, rate_limit_path
@@ -12,6 +13,7 @@ bluesky_client = None
 mastodon_client = None
 twitter_api = None
 twitter_client = None
+tumblr_client = None
 
 # Connection to Mastodon API
 def mastodon_connect():
@@ -85,6 +87,26 @@ def bsky_connect():
             logger.info("Session expired, removing session file.")
             os.remove(session_cache_path)
         exit()
+
+def tumblr_connect():
+    global tumblr_client
+    if tumblr_client:
+        logger.info("Already connected to Tumblr API.")
+        return tumblr_client
+        
+    logger.info("Connecting to Tumblr API.")
+    try:
+        tumblr_client = TumblrRestClient(
+            TUMBLR_CONSUMER_KEY,
+            TUMBLR_CONSUMER_SECRET,
+            TUMBLR_OAUTH_TOKEN,
+            TUMBLR_OAUTH_SECRET
+        )
+        return tumblr_client
+    except Exception as e:
+        logger.error(f"Failed to initialize Tumblr client: {e}")
+        logger.debug(traceback.format_exc())
+        raise e
 
 
 # A wrapper class for the atproto client that allows us to get ratelimit info

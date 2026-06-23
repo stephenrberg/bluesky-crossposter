@@ -2,7 +2,7 @@ This is a massive fork from The Bluesky Crossposter available at [https://github
 
 The changes are as follows:
 
-- Threads and Instagram outputs supported (provide api keys in the relevent settings)
+- Tumblr, Threads and Instagram outputs supported (provide api keys in the relevent settings)
 - Threads and instagram need to have a place to upload content to - You can use S3 buckets on AWS and the free tier should be enough (Theres also Cloud Flare R2 support but it tends to get blocked)
 - Pillow needed to do the resizing and blur boxing for instagram as they have stricter content aspect ratios for images
 - Twitter no longer uses api and instead uses puppeteer (naughty). Provide cookes from a valid session and it should look after itself
@@ -51,13 +51,13 @@ Every service manages post privacy differently. Most notably, Mastodon limits wh
 
 ### Crossposter -> Outputs
 
-| Crossposter | Mastodon | Twitter   | Bluesky    | Instagram | Threads   |
-| ----------- | -------- | --------- | ---------- | --------- | --------- |
-| Public      | Public   | Everybody | Everybody  | Everybody | Everybody |
-| Following   | Private  | Following | Following  | ???       | ???       |
-| Followers   | Private  | Following | Following* |           |           |
-| Unlisted    | Unlisted | Following | Following  |           |           |
-| Mentioned   | Private  | Mentioned | Mentioned  |           |           |
+| Crossposter | Mastodon | Twitter   | Bluesky    | Instagram | Threads   | Tumbler   |
+| ----------- | -------- | --------- | ---------- | --------- | --------- | --------- |
+| Public      | Public   | Everybody | Everybody  | Everybody | Everybody | Everybody |
+| Following   | Private  | Following | Following  | ???       | ???       | ???       |
+| Followers   | Private  | Following | Following* |           |           |           |
+| Unlisted    | Unlisted | Following | Following  |           |           |           |
+| Mentioned   | Private  | Mentioned | Mentioned  |           |           |           |
 
 *Though Bluesky has a setting for only letting followers reply, it can for some reason not be set using the API. Keeping the option in case this changes.
 
