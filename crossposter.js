@@ -1,10 +1,11 @@
 const puppeteer = require('/usr/local/lib/node_modules/puppeteer');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
 (async () => {
   const inputData = JSON.parse(process.argv[2]);
-  const { text, reply_id, quote_id, media } = inputData;
+  let { text, reply_id, quote_id, media, embed_url, bsky_thumb_url } = inputData;
 
   const browser = await puppeteer.launch({
     headless: true,
@@ -37,6 +38,8 @@ const path = require('path');
     }
   });
 
+  let tempDownloadedFile = null;
+
   try {
     const rawCookies = JSON.parse(fs.readFileSync('./cookies.json', 'utf8'));
     
@@ -48,6 +51,29 @@ const path = require('path');
     });
 
     await page.setCookie(...cookies);
+
+    // --- DOWNLOAD PROXIED IMAGE WORKAROUND ---
+    if ((!media || media.length === 0) && embed_url && bsky_thumb_url) {
+      const lowerUrl = embed_url.toLowerCase();
+      if (lowerUrl.includes('serializd.com') || lowerUrl.includes('goodreads.com')) {
+        console.error(`Broken card wrapper targeted (${embed_url}). Triggering image asset injection proxy...`);
+        try {
+          const response = await fetch(bsky_thumb_url);
+          if (response.ok) {
+            const buffer = Buffer.from(await response.arrayBuffer());
+            const tempPath = path.join(os.tmpdir(), `proxy_card_${Date.now()}.jpg`);
+            fs.writeFileSync(tempPath, buffer);
+            tempDownloadedFile = tempPath;
+            
+            // Explicitly force media array assignment up front
+            media = [tempPath];
+            console.error(`Staged local backup file layout mirror at: ${tempPath}`);
+          }
+        } catch (fetchErr) {
+          console.error('Failed to download card proxy preview thumbnail:', fetchErr);
+        }
+      }
+    }
 
     if (reply_id) {
         await page.goto(`https://x.com/i/status/${reply_id}`, { waitUntil: 'networkidle2' });
@@ -66,14 +92,18 @@ const path = require('path');
         await page.focus(editorSelector);
         await page.keyboard.type(completeText, { delay: 50 });
 
+        // MEDIA ATTACHMENT LOOP (REPLY)
         if (media && media.length > 0) {
-          const fileInputSelector = 'input[data-testid="fileInput"]';
-          await page.waitForSelector(fileInputSelector);
+          const fileInputSelector = 'input[type="file"], input[data-testid="fileInput"]';
+          await page.waitForSelector(fileInputSelector, { timeout: 15000 });
           const fileInput = await page.$(fileInputSelector);
           const absolutePaths = media.map(p => path.resolve(p));
           
-          console.error("Attaching media file packages to composition frame...");
-          await fileInput.uploadFile(...absolutePaths);
+          console.error("Attaching media file packages to reply frame:", absolutePaths);
+          await fileInput.uploadFile(...absolutePaths); // Injects file stream context
+          
+          // Force a state update listener change event inside Twitter's DOM structure
+          await fileInput.evaluate(upload => upload.dispatchEvent(new Event('change', { bubbles: true })));
           
           const hasVideo = absolutePaths.some(p => p.toLowerCase().endsWith('.mp4') || p.toLowerCase().endsWith('.mov'));
           if (hasVideo) {
@@ -81,7 +111,7 @@ const path = require('path');
              await new Promise(resolve => setTimeout(resolve, 45000)); 
           } else {
              await page.waitForSelector('[data-testid="attachments"]', { timeout: 15000 });
-             await new Promise(resolve => setTimeout(resolve, 2000));
+             await new Promise(resolve => setTimeout(resolve, 3000));
           }
         }
 
@@ -100,14 +130,18 @@ const path = require('path');
         await page.focus(editorSelector);
         await page.keyboard.type(text + (quote_id ? ` \nhttps://x.com/i/status/${quote_id}` : ''), { delay: 50 });
 
+        // MEDIA ATTACHMENT LOOP (PRIMARY POST)
         if (media && media.length > 0) {
-          const fileInputSelector = 'input[data-testid="fileInput"]';
-          await page.waitForSelector(fileInputSelector);
+          const fileInputSelector = 'input[type="file"], input[data-testid="fileInput"]';
+          await page.waitForSelector(fileInputSelector, { timeout: 15000 });
           const fileInput = await page.$(fileInputSelector);
           const absolutePaths = media.map(p => path.resolve(p));
           
-          console.error("Attaching media file packages to composition frame...");
-          await fileInput.uploadFile(...absolutePaths);
+          console.error("Attaching media file packages to primary compose frame:", absolutePaths);
+          await fileInput.uploadFile(...absolutePaths); // Injects file stream context
+          
+          // Force a state update listener change event inside Twitter's DOM structure
+          await fileInput.evaluate(upload => upload.dispatchEvent(new Event('change', { bubbles: true })));
           
           const hasVideo = absolutePaths.some(p => p.toLowerCase().endsWith('.mp4') || p.toLowerCase().endsWith('.mov'));
           if (hasVideo) {
@@ -115,7 +149,7 @@ const path = require('path');
              await new Promise(resolve => setTimeout(resolve, 45000));
           } else {
              await page.waitForSelector('[data-testid="attachments"]', { timeout: 15000 });
-             await new Promise(resolve => setTimeout(resolve, 2000));
+             await new Promise(resolve => setTimeout(resolve, 3000));
           }
         }
 
@@ -142,6 +176,14 @@ const path = require('path');
     console.error('Execution failure:', error);
     process.exit(1);
   } finally {
+    if (tempDownloadedFile && fs.existsSync(tempDownloadedFile)) {
+      try {
+        fs.unlinkSync(tempDownloadedFile);
+        console.error('Cleaned up temporary proxy card file.');
+      } catch (cleanupErr) {
+        console.error('Failed to clean up temp file:', cleanupErr);
+      }
+    }
     await browser.close();
   }
 })();

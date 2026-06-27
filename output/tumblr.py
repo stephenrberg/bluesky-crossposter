@@ -105,13 +105,24 @@ def post(item):
             
     # --- TEXT ONLY / LINK POST HANDLING ---
     else:
-        # Look for ANY URL anywhere in the text to trigger a card preview
-        any_url_match = re.search(r'(https?://[^\s<>"]+)', combined_text)
+        # Extract native Bluesky external embed items if present
+        embed_url = None
+        bsky_thumb_url = None
+        bsky_embed = item["post"].info.get("embed", {}) if hasattr(item["post"], "info") else item["post"].get("embed", {})
         
-        if any_url_match:
-            target_url = any_url_match.group(1)
-            logger.info(f"Uploading rich LINK post with card preview to Tumblr blog '{TUMBLR_BLOG_NAME}'")
-            
+        if bsky_embed and bsky_embed.get("$type") == "app.bsky.embed.external":
+            external_data = bsky_embed.get("external", {})
+            embed_url = external_data.get("uri")
+            bsky_thumb_url = external_data.get("thumb")
+
+        # Prioritize using a URL from a rich link card if available, else look in the text
+        target_url = embed_url if embed_url else None
+        if not target_url:
+            any_url_match = re.search(r'(https?://[^\s<>"]+)', combined_text)
+            if any_url_match:
+                target_url = any_url_match.group(1)
+        
+        if target_url:
             # Scrub the trailing URL if it sits at the absolute bottom
             trailing_url_pattern = r'\n\s*(https?://[^\s<>"]+)\s*$'
             trailing_match = re.search(trailing_url_pattern, combined_text)
@@ -129,13 +140,32 @@ def post(item):
             url_pattern = r'(https?://[^\s<>"]+)'
             combined_text = re.sub(url_pattern, r'[\1](\1)', combined_text)
             
-            response = tumblr_client.create_link(
-                TUMBLR_BLOG_NAME,
-                state="published",
-                tags=tags,
-                url=target_url,
-                description=combined_text
-            )
+            # Append markdown target URL back to text description if it was removed
+            if target_url not in combined_text:
+                combined_text = f"{combined_text}\n\n[{target_url}]({target_url})".strip()
+
+            # STRATEGY FALLBACK: If we have a valid link poster thumbnail from Bluesky, use a Photo Post.
+            # This completely bypasses Tumblr's broken web crawler extraction logic.
+            if bsky_thumb_url:
+                logger.info(f"Uploading image-backed card proxy as Photo Post to Tumblr blog '{TUMBLR_BLOG_NAME}'")
+                response = tumblr_client.create_photo(
+                    TUMBLR_BLOG_NAME,
+                    state="published",
+                    tags=tags,
+                    format="markdown",
+                    caption=combined_text,
+                    source=bsky_thumb_url  # pytumblr accepts remote web URLs inside the source parameter
+                )
+            else:
+                # Fallback to structural link type if no thumbnail was captured
+                logger.info(f"Uploading rich LINK post container to Tumblr blog '{TUMBLR_BLOG_NAME}'")
+                response = tumblr_client.create_link(
+                    TUMBLR_BLOG_NAME,
+                    state="published",
+                    tags=tags,
+                    url=target_url,
+                    description=combined_text
+                )
         else:
             # Standard Text Post Fallback (Clean tags, convert remaining text inline)
             logger.info(f"Uploading standard text post to Tumblr blog '{TUMBLR_BLOG_NAME}'")

@@ -20,6 +20,8 @@ from main.alerts import send_failure_alert
 #     aws_secret_access_key=auth.R2_SECRET_KEY,
 #     region_name='auto'
 # )
+# List of domains that require the fallback image injection workaround
+TARGET_DOMAINS = ["serializd.com", "goodreads.com", "backloggd.com"]
 
 S3_CLIENT = boto3.client(
     's3',
@@ -91,24 +93,21 @@ def process_threads_hashtags(text):
     return cleaned_text.strip()
 
 def get_dominant_color(img):
-    """Returns the most frequent color in the image as an (R, G, B) tuple."""
     try:
-        # Resize down to speed up color counting
         small_img = img.resize((50, 50))
         result = small_img.convert('P', palette=Image.ADAPTIVE, colors=1)
         result = result.convert('RGB')
         return result.getpixel((0, 0))
     except Exception:
-        return (255, 255, 255) # Fallback to white
+        return (255, 255, 255)
 
 def process_image_for_instagram(local_path):
-    """Resizes/Pads images safely using os.path logic."""
     try:
         if local_path.lower().endswith((".mp4", ".mov")):
             return local_path 
 
         with Image.open(local_path) as img:
-            img.load() # Ensure the image is actually loaded into memory
+            img.load()
             
             if img.mode != 'RGB':
                 img = img.convert('RGB')
@@ -126,12 +125,8 @@ def process_image_for_instagram(local_path):
             target_size = best_target["size"]
 
             padding_color = get_dominant_color(img)
-            
-            # Apply padding
             new_img = ImageOps.pad(img, target_size, color=padding_color, centering=(0.5, 0.5))
             
-            # --- FIXED PATH LOGIC ---
-            # Splits '/path/to/image.jpg' into ('/path/to/image', '.jpg')
             base_path, ext = os.path.splitext(local_path)
             processed_path = f"{base_path}_processed{ext}"
             
@@ -171,7 +166,7 @@ def upload_to_s3(file_path):
     try:
         S3_CLIENT.upload_file(
             file_path, 
-            auth.S3_BUCKET_NAME, # Pull from your settings
+            auth.S3_BUCKET_NAME,
             filename,
             ExtraArgs={'ContentType': content_type}
         )
@@ -190,6 +185,26 @@ def output(platform, queue_items):
         public_urls = []
         is_video = False
         temp_files = []
+        
+        # --- CONDITIONAL CARD PREVIEW EMBED DISPATCHER ---
+        embed_url = None
+        bsky_thumb_url = None
+        
+        bsky_embed = source_post.info.get("embed", {})
+        if bsky_embed and bsky_embed.get("$type") == "app.bsky.embed.external":
+            external_data = bsky_embed.get("external", {})
+            temp_embed_url = external_data.get("uri")
+            temp_thumb_url = external_data.get("thumb")
+            
+            if temp_embed_url:
+                lower_url = temp_embed_url.lower()
+                # ONLY force proxy images to download if we are currently posting to Threads
+                if platform == "threads" and any(domain in lower_url for domain in TARGET_DOMAINS):
+                    embed_url = temp_embed_url
+                    bsky_thumb_url = temp_thumb_url
+                else:
+                    # For Instagram, or non-target domains, completely drop the preview image
+                    embed_url = temp_embed_url
 
         parent_meta_id = database.get_id(source_post.info.get("reply_id"), platform)
         if platform == "instagram" and source_post.info.get("reply_id"):
@@ -211,49 +226,71 @@ def output(platform, queue_items):
             # Use your standard hashtag remover for Instagram/others
             post_text = remove_sky_hashtags(raw_text)
 
-        if platform == "instagram" and not source_post.info.get('media'):
-            logger.info(f"Skipping Instagram: Post ID {post_id} is text-only.")
-            # Mark as skipped or success in DB so it doesn't keep retrying
+        # Check media attachments or our active fallback thumbnail configuration
+        has_native_media = bool(source_post.info.get('media'))
+        has_proxy_image = bool(bsky_thumb_url)
+
+        # Safeguard: Instagram skips right away if it has no native media assets
+        if platform == "instagram" and not has_native_media:
+            logger.info(f"Skipping Instagram: Post ID {post_id} is link/text-only. Embed image ignored for IG.")
             database.update(post_id, platform, "skipped") 
             database.save()
             continue
       
         logger.info(f"Posting \"{post_text}\" to {platform}")
 
-        if source_post.info.get('media'):
+        # 1. Process regular attachment media if present
+        if has_native_media:
             all_files = glob.glob(os.path.join(image_dir, "*"))
-            print(f"DEBUG: Looking for ID: {post_id}")
-            print(f"DEBUG: First file in folder: {os.path.basename(all_files[0]) if all_files else 'FOLDER EMPTY'}")
             this_post_files = [f for f in all_files if str(post_id) in os.path.basename(f)]
             
-            if not this_post_files:
-                logger.error(f"Media expected but not found for ID {post_id}")
+            if this_post_files:
+                for path in this_post_files:
+                    work_path = path
+                    if platform == "instagram" and not path.lower().endswith((".mp4", ".mov")):
+                        work_path = process_image_for_instagram(path)
+                        if work_path != path:
+                            temp_files.append(work_path)
+
+                    content_url = upload_to_s3(work_path)
+                    if content_url:
+                        public_urls.append(content_url)
+                        if path.lower().endswith((".mp4", ".mov")):
+                            is_video = True
+            else:
+                logger.error(f"Media expected but files not found for ID {post_id}")
                 continue
-            
-            if not this_post_files:
-                logger.error(f"CRITICAL: No media files found matching Post ID {post_id}. Skipping post.")
-                continue # Skip to the next post in the queue
 
-            for path in this_post_files:
-                work_path = path
-                
-                # Only process if it's Instagram and not a video
-                if platform == "instagram" and not path.lower().endswith((".mp4", ".mov")):
-                    work_path = process_image_for_instagram(path)
-                    # If process_image_for_instagram created a new file, track it for deletion
-                    if work_path != path:
-                        temp_files.append(work_path)
-
-                content_url = upload_to_s3(work_path)
-                if content_url:
-                    public_urls.append(content_url)
-                    if path.lower().endswith((".mp4", ".mov")):
-                        is_video = True
+        # 2. Alternatively, route targeted external link card thumb through S3 bucket (Threads Only)
+        elif has_proxy_image and platform == "threads":
+            logger.info(f"Downloading external proxy link card thumbnail from: {bsky_thumb_url}")
+            try:
+                response = requests.get(bsky_thumb_url, timeout=15)
+                if response.status_code == 200:
+                    ext = ".jpg"
+                    if "image/png" in response.headers.get("Content-Type", ""):
+                        ext = ".png"
+                        
+                    local_thumb_name = f"thumb_{post_id}{ext}"
+                    local_thumb_path = os.path.join(image_dir, local_thumb_name)
+                    
+                    with open(local_thumb_path, "wb") as f:
+                        f.write(response.content)
+                    temp_files.append(local_thumb_path)
+                    
+                    content_url = upload_to_s3(local_thumb_path)
+                    if content_url:
+                        public_urls.append(content_url)
+                        logger.info(f"Proxy link card thumbnail routed to S3 successfully: {content_url}")
+            except Exception as thumb_err:
+                logger.error(f"Failed to process external proxy link card image: {thumb_err}")
         
-        # 2. Publish logic
-        success, new_meta_id = publish_to_meta(platform, post_text, public_urls, is_video, reply_id=parent_meta_id)
+        # 3. Publish execution
+        success, new_meta_id = publish_to_meta(
+            platform, post_text, public_urls, is_video, reply_id=parent_meta_id, embed_url=embed_url
+        )
         
-        # --- CLEANUP PROCESSED FILES ---
+        # Cleanup processed temp files
         for f in temp_files:
             try:
                 if os.path.exists(f):
@@ -269,7 +306,7 @@ def output(platform, queue_items):
             logger.error(f"Failed to post to {platform}")
             send_failure_alert(platform, f"Failed to post to {platform}")
 
-def publish_to_meta(platform, text, media_urls, is_video, reply_id=None):
+def publish_to_meta(platform, text, media_urls, is_video, reply_id=None, embed_url=None):
     if not media_urls and platform == "instagram":
         return False, None
 
@@ -339,9 +376,11 @@ def publish_to_meta(platform, text, media_urls, is_video, reply_id=None):
             'image_url': media_urls[0]
         }
     
-    # --- TEXT ONLY ---
+    # --- TEXT OR NATIVE LINK ATTACHMENT ---
     else:
         payload = {'access_token': token, text_key: text, 'media_type': 'TEXT'}
+        if platform == "threads" and embed_url:
+            payload['link_attachment'] = embed_url
 
     if platform == "threads" and reply_id:
         payload['reply_to_id'] = reply_id

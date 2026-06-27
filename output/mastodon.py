@@ -1,4 +1,7 @@
 import traceback
+import requests
+import tempfile
+import os
 from main.functions import logger
 from main.connections import mastodon_connect
 from settings.auth import MASTODON_HANDLE, MASTODON_INSTANCE
@@ -58,8 +61,12 @@ def post(item):
     language = None
     if not settings.lang_toggle["mastodon"]:
         language = item["post"].info["language"][0]
+        
     media_ids = []
     # If post includes images, images are uploaded so that they can be included in the toot
+    temp_files_to_clean = []
+
+    # If post includes native images, upload them directly
     if item["post"].media:
         for media_item in item["post"].media:
             # If alt text was added to the image on bluesky, it's also added to the image on mastodon,
@@ -69,8 +76,51 @@ def post(item):
             if len(alt) > 1500:
                 alt = alt[:1496] + "..."
             logger.info(f"Uploading media {media_item['filename']} with alt: {alt} to mastodon")
-            res = mastodon_client.media_post(media_item["filename"], description=media_item["alt"], synchronous=True)
+            res = mastodon_client.media_post(media_item["filename"], description=alt, synchronous=True)
             media_ids.append(res.id)
+            
+    # WORKAROUND: If post is text-only but has a link card object pointing to our problematic platforms
+    else:
+        embed_url = None
+        bsky_thumb_url = None
+        
+        # Safely extract embed structures from the base object
+        bsky_embed = item["post"].info.get("embed", {}) if hasattr(item["post"], "info") else item["post"].get("embed", {})
+        if bsky_embed and bsky_embed.get("$type") == "app.bsky.embed.external":
+            external_data = bsky_embed.get("external", {})
+            embed_url = external_data.get("uri")
+            bsky_thumb_url = external_data.get("thumb")
+
+        if embed_url and bsky_thumb_url:
+            is_problematic_scraper = any(d in embed_url.lower() for d in ["backloggd.com", "serializd.com", "goodreads.com"])
+            
+            if is_problematic_scraper:
+                logger.info(f"Detected problematic card wrapper on Mastodon pipeline. Fetching remote thumbnail...")
+                try:
+                    # Download the image from the Bluesky CDN
+                    img_response = requests.get(bsky_thumb_url, timeout=15)
+                    if img_response.status_code == 200:
+                        # Establish a localized file inside the system temp folder cleanly
+                        fd, temp_path = tempfile.mkstemp(suffix=".jpg")
+                        
+                        # Use Python's built-in open() context manager via the file descriptor
+                        with open(fd, 'wb') as f:
+                            f.write(img_response.content)
+                        
+                        temp_files_to_clean.append(temp_path)
+                        
+                        # Upload to your target Mastodon instance
+                        logger.info(f"Uploading fallback image card banner to Mastodon...")
+                        res = mastodon_client.media_post(
+                            temp_path, 
+                            description=f"Review cover art for {embed_url}", 
+                            synchronous=True
+                        )
+                        media_ids.append(res.id)
+                except Exception as thumb_err:
+                    logger.error(f"Failed to fetch or attach proxy link thumbnail on Mastodon: {thumb_err}")
+
+    # Process and publish the thread text
     for text_post in text_content:
         logger.info(f"Posting \"{text_post}\" to Mastodon")
         logger.debug(f"mastodon_client.status_post({text_post}, in_reply_to_id={reply_to_post}, media_ids={media_ids}, visibility={visibility}, language={language})")
@@ -80,6 +130,16 @@ def post(item):
         # setting media ids to empty to not end up posting the media in every post in the thread
         media_ids = []
         database.update(item["id"], "mastodon", a["id"])
+        
+    # --- PROXIED STORAGE CLEANUP ---
+    for temp_file in temp_files_to_clean:
+        try:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+                logger.info(f"Cleaned up temporary proxy card file: {temp_file}")
+        except Exception as cleanup_err:
+            logger.error(f"Failed to delete temp storage file {temp_file}: {cleanup_err}")
+            
     logger.info("Posted to mastodon")
 
 # Function for deleting post. Takes ID of post from origin (Bluesky)
@@ -106,5 +166,4 @@ def set_visibility(post):
     elif settings.mastodon_visibility == "hybrid" and (post.info["reply_id"] or post.info["quote_id"]):
         return "unlisted"
     elif settings.mastodon_visibility == "hybrid":
-        return "public"
-    
+        return "public"        

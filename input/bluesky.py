@@ -120,6 +120,46 @@ def get_posts():
                 "type": "image",
                 "items": images
             }
+
+        embed_dict = {}
+        bsky_embed = getattr(status.post, "embed", None)
+        if not bsky_embed and hasattr(status.post, "record"):
+            bsky_embed = getattr(status.post.record, "embed", None)
+
+        if bsky_embed:
+            # Check properties dynamically to account for both raw record objects and hydrated view variations
+            embed_type = getattr(bsky_embed, "py_type", "") or getattr(bsky_embed, "$type", "")
+            
+            # Use .startswith() to correctly intercept variants like 'app.bsky.embed.external#view'
+            if embed_type and embed_type.startswith("app.bsky.embed.external"):
+                external = getattr(bsky_embed, "external", None)
+                if external:
+                    cid_hash = None
+                    constructed_thumb_url = None
+                    thumb_obj = getattr(external, "thumb", None)
+                    
+                    if thumb_obj:
+                        # CASE 1: The thumbnail is already a view-ready string URL (e.g. from App View)
+                        if isinstance(thumb_obj, str):
+                            constructed_thumb_url = thumb_obj
+                        # CASE 2: The thumbnail is a raw cryptographic Blob reference object
+                        else:
+                            cid_hash = getattr(thumb_obj, "cid", None)
+                            if not cid_hash and hasattr(thumb_obj, "ref"):
+                                cid_hash = str(getattr(thumb_obj.ref, "link", ""))
+                            
+                            author_did = getattr(status.post.author, "did", None)
+                            if cid_hash and author_did:
+                                constructed_thumb_url = f"https://bsky.social/xrpc/com.atproto.sync.getBlob?did={author_did}&cid={cid_hash}"
+
+                    embed_dict = {
+                        "$type": "app.bsky.embed.external",
+                        "external": {
+                            "uri": getattr(external, "uri", None),
+                            "thumb": constructed_thumb_url
+                        }
+                    }
+
         post_info = {
             "post_id": post_id,
             "text": text,
@@ -129,6 +169,7 @@ def get_posts():
             "quote_id": quoted_id,
             "quote_url": quote_url,
             "media": media,
+            "embed": embed_dict, # Successfully populated mapping object dictionary
             "language": status.post.record.langs,
             "privacy": privacy_setting,
             "repost": repost,
