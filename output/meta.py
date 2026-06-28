@@ -242,8 +242,23 @@ def output(platform, queue_items):
         # 1. Process regular attachment media if present
         if has_native_media:
             all_files = glob.glob(os.path.join(image_dir, "*"))
-            this_post_files = [f for f in all_files if str(post_id) in os.path.basename(f)]
             
+            # RESILIENT FIX: Match files starting with post_id while strictly skipping processed variants
+            this_post_files = []
+            for f in all_files:
+                fname = os.path.basename(f)
+                
+                # Check if it starts with the post_id followed by a boundary (like an underscore or extension dot)
+                # and explicitly reject any temp files
+                starts_with_id = fname.startswith(str(post_id))
+                is_temp_file = "_processed" in fname or "thumb_" in fname
+                
+                if starts_with_id and not is_temp_file:
+                    this_post_files.append(f)
+            
+            # Sort files to maintain sequence consistency
+            this_post_files.sort()
+
             if this_post_files:
                 for path in this_post_files:
                     work_path = path
