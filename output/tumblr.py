@@ -103,6 +103,42 @@ def post(item):
         merged_tags_set = set(tag.lower() for tag in tags + parent_tags)
         combined_tags = list(merged_tags_set)
 
+        # --- MEDIA WITHIN THREADS WORKAROUND ---
+        # Upload assets as unlisted drafts to extract official CDN paths,
+        # then assemble the layout with media blocks sitting FIRST.
+        if item["post"].media:
+            media_paths = [media_item["filename"] for media_item in item["post"].media]
+            embedded_media_markdown = ""
+            
+            for path in media_paths:
+                try:
+                    if path.lower().endswith((".mp4", ".mov")):
+                        logger.info(f"Uploading thread video asset proxy to CDN: {path}")
+                        media_res = tumblr_client.create_video(TUMBLR_BLOG_NAME, state="draft", data=path)
+                        if media_res and "id" in media_res:
+                            video_info = tumblr_client.posts(TUMBLR_BLOG_NAME, id=media_res["id"])
+                            video_url = video_info["posts"][0].get("video_url", "")
+                            if video_url:
+                                embedded_media_markdown += f"<video controls src='{video_url}' width='100%'></video>\n\n"
+                            tumblr_client.delete_post(TUMBLR_BLOG_NAME, media_res["id"])
+                    else:
+                        logger.info(f"Uploading thread image asset proxy to CDN: {path}")
+                        media_res = tumblr_client.create_photo(TUMBLR_BLOG_NAME, state="draft", data=path)
+                        if media_res and "id" in media_res:
+                            photo_info = tumblr_client.posts(TUMBLR_BLOG_NAME, id=media_res["id"])
+                            photos = photo_info["posts"][0].get("photos", [])
+                            for p in photos:
+                                img_url = p.get("original_size", {}).get("url")
+                                if img_url:
+                                    # REMOVED PLACEHOLDER TEXT TO DROP THE ALT BADGE
+                                    embedded_media_markdown += f"![]({img_url})\n\n"
+                            tumblr_client.delete_post(TUMBLR_BLOG_NAME, media_res["id"])
+                except Exception as media_upload_err:
+                    logger.error(f"Failed to inline thread media to Markdown block: {media_upload_err}")
+            
+            # Sequence Change: Places images/videos at the absolute top, followed by the text
+            combined_text = f"{embedded_media_markdown}{combined_text}".strip()
+
         # Tumblr creates threads by reblogging the parent post with a comment
         response = tumblr_client.reblog(
             TUMBLR_BLOG_NAME,
