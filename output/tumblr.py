@@ -54,10 +54,17 @@ def repost(item):
     tumblr_client = tumblr_connect()
     post_id, blog_name = database.get_id(item["id"], "tumblr")
     logger.info(f"Reblogging post {post_id} from blog {blog_name} on Tumblr")
+    
+    from settings.auth import TUMBLR_BLOG_NAME
+    response = tumblr_client.reblog(TUMBLR_BLOG_NAME, id=post_id)
+    
+    if response and "id" in response:
+        database.update(item["id"], "tumblr", str(response["id"]))
 
 # Function for sending posts
 def post(item):
     tumblr_client = tumblr_connect()
+    from settings.auth import TUMBLR_BLOG_NAME
     
     text_content = item["post"].text_content("tumblr")
     full_raw_text = " ".join(text_content)
@@ -66,11 +73,51 @@ def post(item):
     # Stitch the raw content together first so we can parse across the whole post structure
     combined_text = "\n\n".join(text_content)
     
-    from settings.auth import TUMBLR_BLOG_NAME
-    
-    reply_to_post = database.get_id(item["post"].info.get("reply_id"), "tumblr")
-    if item["post"].info.get("reply_id") and not reply_to_post:
-        logger.info(f"Can't continue thread since reference {item['post'].info['reply_id']} has not been crossposted to Tumblr")
+    # --- THREAD / REPLY HANDLING ---
+    reply_id = item["post"].info.get("reply_id")
+    if reply_id:
+        reply_to_post = database.get_id(reply_id, "tumblr")
+        if not reply_to_post:
+            logger.info(f"Can't continue thread since reference {reply_id} has not been crossposted to Tumblr")
+            return
+        
+        # Clean the text structure for Tumblr
+        combined_text = process_tumblr_text(combined_text)
+        logger.info(f"Threading post onto existing Tumblr post {reply_to_post}")
+        
+        # --- DYNAMIC REBLOG KEY & HASHTAG FETCHING ---
+        parent_tags = []
+        try:
+            # Look up the parent post to retrieve its valid reblog_key and original tags
+            parent_post_data = tumblr_client.posts(TUMBLR_BLOG_NAME, id=reply_to_post)
+            if "posts" in parent_post_data and len(parent_post_data["posts"]) > 0:
+                parent_post = parent_post_data["posts"][0]
+                reblog_key = parent_post.get("reblog_key")
+                parent_tags = parent_post.get("tags", [])
+            else:
+                raise Exception("Post found in database but not found on Tumblr.")
+        except Exception as fetch_err:
+            raise Exception(f"Failed to fetch metadata for parent post {reply_to_post}: {fetch_err}")
+
+        # Combine, lowercase, and deduplicate tags from both posts
+        merged_tags_set = set(tag.lower() for tag in tags + parent_tags)
+        combined_tags = list(merged_tags_set)
+
+        # Tumblr creates threads by reblogging the parent post with a comment
+        response = tumblr_client.reblog(
+            TUMBLR_BLOG_NAME,
+            id=reply_to_post,
+            reblog_key=reblog_key,
+            comment=combined_text,
+            tags=combined_tags,
+            format="markdown"
+        )
+        
+        if response and "id" in response:
+            database.update(item["id"], "tumblr", str(response["id"]))
+            logger.info(f"Successfully threaded to Tumblr! Post ID: {response['id']}")
+        else:
+            raise Exception(f"Tumblr API returned an unexpected payload during thread reblog: {response}")
         return
 
     media = item["post"].media
@@ -180,7 +227,7 @@ def post(item):
 
     # Database update verification block
     if response and "id" in response:
-        database.update(item["id"], "tumblr", response["id"])
+        database.update(item["id"], "tumblr", str(response["id"]))
         logger.info(f"Successfully posted to Tumblr! Post ID: {response['id']}")
     else:
         raise Exception(f"Tumblr API returned an unexpected payload: {response}")

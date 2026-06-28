@@ -34,8 +34,9 @@ class Database():
         # For bluesky the uri is also needed in order to repost and respond.
         if service == "bluesky": 
             uri = service_data.get("uri", "")
-            return id, uri
-        return id
+            return str(id) if id else id, uri
+            
+        return str(id) if id else id
 
     # Reading database.json
     def read_db_file(self):
