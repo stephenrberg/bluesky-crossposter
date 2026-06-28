@@ -86,6 +86,8 @@ def process_threads_hashtags(text):
     
     # If there was a Letterboxd URL, put it back at the very end
     if url_at_end:
+        # CLEANUP FIX: Strip out invisible unicode anomalies (like \u2060) and trailing whitespaces
+        url_at_end = re.sub(r'[^\x21-\x7E]+', '', url_at_end).strip()
         cleaned_text = cleaned_text.rstrip() + f"\n\n{url_at_end}"
 
     # Final polish

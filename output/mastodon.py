@@ -128,34 +128,37 @@ def post(item):
             formatted_text_content.append(text_post)
             continue
 
-        # 1. Match ONLY the cluster of hashtags at the absolute end of the post.
-        # This ignores inline hashtags like #gamedev in the middle of a sentence.
-        trailing_soup_match = re.search(r'((?:\s*#\w+)+\s*$)', text_post)
+        # 1. Match trailing hashtags that are either at the end OR followed optionally by a URL
+        trailing_soup_pattern = r'((?:\s*#\w+)+)\s*(https?://[^\s<>"]+)?\s*$'
+        trailing_soup_match = re.search(trailing_soup_pattern, text_post)
         
         if trailing_soup_match:
             raw_soup = trailing_soup_match.group(1)
+            # Capture the URL if it was sitting below the hashtag block
+            url_at_end = trailing_soup_match.group(2)
             
             # Extract and clean the soup into a single uniform line
             found_tags = re.findall(r'#(\w+)', raw_soup)
             hashtag_soup = " ".join(f"#{tag}" for tag in found_tags)
             
-            # Remove just the trailing soup from the main post body
-            # (Using rsplit or slicing up to the match index to guarantee we don't touch the body)
-            soup_start_idx = text_post.rfind(raw_soup)
-            base_text = text_post[:soup_start_idx]
+            # Slice off the entire trailing cluster (tags + potential URL) from the body
+            base_text = text_post[:trailing_soup_match.start()].strip()
             
-            # 2. Check if a lone URL sits right before where the trailing soup was
+            # 2. Check if a lone URL sits right before the trailing soup was removed
             trailing_url_pattern = r'(https?://[^\s<>"]+)\s*$'
-            url_match = re.search(trailing_url_pattern, base_text)
+            url_before_match = re.search(trailing_url_pattern, base_text)
             
-            if url_match:
-                target_url = url_match.group(1)
-                # Strip the URL off the new bottom of the text
-                base_text = re.sub(trailing_url_pattern, '', base_text)
-                base_text = base_text.strip()
+            target_url = None
+            if url_at_end:
+                target_url = url_at_end
+            elif url_before_match:
+                target_url = url_before_match.group(1)
+                base_text = re.sub(trailing_url_pattern, '', base_text).strip()
+            
+            # Assemble the structured post: Core Text -> URL -> Tags
+            if target_url:
                 final_post = f"{base_text}\n\n{target_url}\n\n{hashtag_soup}"
             else:
-                base_text = base_text.strip()
                 final_post = f"{base_text}\n\n{hashtag_soup}"
                 
             # Normalize to avoid any accidental triple breaks
