@@ -2,6 +2,7 @@ import traceback
 import requests
 import tempfile
 import os
+import re
 from main.functions import logger
 from main.connections import mastodon_connect
 from settings.auth import MASTODON_HANDLE, MASTODON_INSTANCE
@@ -120,6 +121,51 @@ def post(item):
                 except Exception as thumb_err:
                     logger.error(f"Failed to fetch or attach proxy link thumbnail on Mastodon: {thumb_err}")
 
+    # --- ADVANCED HASHTAG & URL RE-ORDERING ---
+    formatted_text_content = []
+    for text_post in text_content:
+        if not text_post:
+            formatted_text_content.append(text_post)
+            continue
+
+        # 1. Match ONLY the cluster of hashtags at the absolute end of the post.
+        # This ignores inline hashtags like #gamedev in the middle of a sentence.
+        trailing_soup_match = re.search(r'((?:\s*#\w+)+\s*$)', text_post)
+        
+        if trailing_soup_match:
+            raw_soup = trailing_soup_match.group(1)
+            
+            # Extract and clean the soup into a single uniform line
+            found_tags = re.findall(r'#(\w+)', raw_soup)
+            hashtag_soup = " ".join(f"#{tag}" for tag in found_tags)
+            
+            # Remove just the trailing soup from the main post body
+            # (Using rsplit or slicing up to the match index to guarantee we don't touch the body)
+            soup_start_idx = text_post.rfind(raw_soup)
+            base_text = text_post[:soup_start_idx]
+            
+            # 2. Check if a lone URL sits right before where the trailing soup was
+            trailing_url_pattern = r'(https?://[^\s<>"]+)\s*$'
+            url_match = re.search(trailing_url_pattern, base_text)
+            
+            if url_match:
+                target_url = url_match.group(1)
+                # Strip the URL off the new bottom of the text
+                base_text = re.sub(trailing_url_pattern, '', base_text)
+                base_text = base_text.strip()
+                final_post = f"{base_text}\n\n{target_url}\n\n{hashtag_soup}"
+            else:
+                base_text = base_text.strip()
+                final_post = f"{base_text}\n\n{hashtag_soup}"
+                
+            # Normalize to avoid any accidental triple breaks
+            final_post = re.sub(r'\n{3,}', '\n\n', final_post)
+            formatted_text_content.append(final_post.strip())
+        else:
+            # If there is no hashtag soup cluster at the end, leave the post completely untouched
+            formatted_text_content.append(text_post)
+            
+    text_content = formatted_text_content
     # Process and publish the thread text
     for text_post in text_content:
         logger.info(f"Posting \"{text_post}\" to Mastodon")
@@ -166,4 +212,4 @@ def set_visibility(post):
     elif settings.mastodon_visibility == "hybrid" and (post.info["reply_id"] or post.info["quote_id"]):
         return "unlisted"
     elif settings.mastodon_visibility == "hybrid":
-        return "public"        
+        return "public"
