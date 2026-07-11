@@ -5,6 +5,8 @@ from main.connections import tumblr_connect
 from main.db import database
 from main.alerts import send_failure_alert
 import re
+import time
+import json
 
 def extract_all_hashtags(text):
     if not text:
@@ -34,6 +36,41 @@ def process_tumblr_text(text):
     cleaned_text = re.sub(url_pattern, r'[\1](\1)', cleaned_text)
 
     return cleaned_text.strip()
+
+def wait_for_media_processing(tumblr_client, blog_name, draft_id, media_type="photo"):
+    """
+    Polls the Tumblr API using exponential backoff until the draft media 
+    has been fully processed and its CDN URLs are ready.
+    """
+    delay = 2
+    max_delay = 60
+    attempts = 0
+    max_attempts = 8
+    
+    while attempts < max_attempts:
+        try:
+            info = tumblr_client.posts(blog_name, id=draft_id)
+            if "posts" in info and len(info["posts"]) > 0:
+                post_data = info["posts"][0]
+                
+                if media_type == "video":
+                    video_url = post_data.get("video_url")
+                    if video_url:
+                        return post_data
+                else:  # photo
+                    photos = post_data.get("photos", [])
+                    if photos and photos[0].get("original_size", {}).get("url"):
+                        return post_data
+                        
+        except Exception as e:
+            logger.warning(f"Error checking draft {draft_id} status: {e}")
+            
+        logger.info(f"Draft {draft_id} ({media_type}) still processing. Retrying in {delay}s...")
+        time.sleep(delay)
+        delay = min(delay * 2, max_delay)
+        attempts += 1
+        
+    raise TimeoutError(f"Tumblr took too long to process the draft {media_type} asset.")
 
 # Function for processing output queue
 def output(queue):
@@ -103,12 +140,11 @@ def post(item):
         merged_tags_set = set(tag.lower() for tag in tags + parent_tags)
         combined_tags = list(merged_tags_set)
 
-        # --- MEDIA WITHIN THREADS WORKAROUND ---
-        # Upload assets as unlisted drafts to extract official CDN paths,
-        # then assemble the layout with media blocks sitting FIRST.
+        # --- MEDIA WITHIN THREADS WORKAROUND (PURE HTML STRATEGY) ---
+        embedded_media_html = ""
+        
         if item["post"].media:
             media_paths = [media_item["filename"] for media_item in item["post"].media]
-            embedded_media_markdown = ""
             
             for path in media_paths:
                 try:
@@ -116,37 +152,49 @@ def post(item):
                         logger.info(f"Uploading thread video asset proxy to CDN: {path}")
                         media_res = tumblr_client.create_video(TUMBLR_BLOG_NAME, state="draft", data=path)
                         if media_res and "id" in media_res:
-                            video_info = tumblr_client.posts(TUMBLR_BLOG_NAME, id=media_res["id"])
-                            video_url = video_info["posts"][0].get("video_url", "")
+                            # Use backoff polling loop to ensure it is processed
+                            video_info = wait_for_media_processing(tumblr_client, TUMBLR_BLOG_NAME, media_res["id"], media_type="video")
+                            
+                            # CRITICAL FIX: Extract the post-transcoded final ID from the processing response
+                            final_video_id = video_info.get("id", media_res["id"])
+                            video_url = video_info.get("video_url", "")
+                            
                             if video_url:
-                                embedded_media_markdown += f"<video controls src='{video_url}' width='100%'></video>\n\n"
-                            tumblr_client.delete_post(TUMBLR_BLOG_NAME, media_res["id"])
+                                embedded_media_html += f'<video controls src="{video_url}" width="100%"></video><br><br>'
+                            
+                            tumblr_client.delete_post(TUMBLR_BLOG_NAME, final_video_id)
                     else:
                         logger.info(f"Uploading thread image asset proxy to CDN: {path}")
                         media_res = tumblr_client.create_photo(TUMBLR_BLOG_NAME, state="draft", data=path)
                         if media_res and "id" in media_res:
-                            photo_info = tumblr_client.posts(TUMBLR_BLOG_NAME, id=media_res["id"])
-                            photos = photo_info["posts"][0].get("photos", [])
+                            # Use backoff polling loop to ensure it is processed
+                            photo_info = wait_for_media_processing(tumblr_client, TUMBLR_BLOG_NAME, media_res["id"], media_type="photo")
+                            
+                            # Extract final post ID in case image normalization changed the placeholder
+                            final_photo_id = photo_info.get("id", media_res["id"])
+                            photos = photo_info.get("photos", [])
+                            
                             for p in photos:
                                 img_url = p.get("original_size", {}).get("url")
                                 if img_url:
-                                    # REMOVED PLACEHOLDER TEXT TO DROP THE ALT BADGE
-                                    embedded_media_markdown += f"![]({img_url})\n\n"
-                            tumblr_client.delete_post(TUMBLR_BLOG_NAME, media_res["id"])
+                                    embedded_media_html += f'<img src="{img_url}"><br><br>'
+                            
+                            tumblr_client.delete_post(TUMBLR_BLOG_NAME, final_photo_id)
                 except Exception as media_upload_err:
-                    logger.error(f"Failed to inline thread media to Markdown block: {media_upload_err}")
+                    logger.error(f"Failed to inline thread media to HTML block: {media_upload_err}")
             
-            # Sequence Change: Places images/videos at the absolute top, followed by the text
-            combined_text = f"{embedded_media_markdown}{combined_text}".strip()
+        # Convert text newlines to standard HTML line breaks for layout rendering
+        html_text = combined_text.replace("\n", "<br>")
+        final_comment = f"{embedded_media_html}{html_text}".strip()
 
-        # Tumblr creates threads by reblogging the parent post with a comment
+        # Native reblog method works reliably when handling standard HTML strings
         response = tumblr_client.reblog(
             TUMBLR_BLOG_NAME,
             id=reply_to_post,
             reblog_key=reblog_key,
-            comment=combined_text,
+            comment=final_comment,
             tags=combined_tags,
-            format="markdown"
+            format="html"
         )
         
         if response and "id" in response:
