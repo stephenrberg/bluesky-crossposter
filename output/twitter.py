@@ -3,6 +3,10 @@ import subprocess
 import json
 import time
 import random
+import os
+import re
+import requests
+from urllib.parse import urlparse, urlunparse
 from main.functions import logger
 from settings.auth import *
 from settings import settings
@@ -12,7 +16,33 @@ from main.alerts import send_failure_alert
 # List of domains that require the image injection workaround
 TARGET_DOMAINS = ["serializd.com", "goodreads.com"]
 
-# Function for processing output queue
+def handle_klipy_twitter_gif(raw_url, post_id, image_dir):
+    """
+    Downloads the clean source GIF file from Klipy directly onto the local host system
+    so the Puppeteer browser automation container can attach it natively as a media file.
+    """
+    try:
+        parsed_url = urlparse(raw_url)
+        # Strip the trailing query parameters to isolate the raw static GIF asset path
+        clean_path = urlunparse((parsed_url.scheme, parsed_url.netloc, parsed_url.path, '', '', ''))
+        
+        logger.info(f"Downloading original source GIF for Twitter automation: {clean_path}")
+        
+        response = requests.get(clean_path, timeout=15)
+        if response.status_code == 200:
+            local_name = f"gif_{post_id}.gif"
+            local_path = os.path.join(image_dir, local_name)
+            
+            with open(local_path, "wb") as f:
+                f.write(response.content)
+            
+            return local_path
+            
+    except Exception as e:
+        logger.error(f"Failed to pull remote Klipy GIF binary for local file upload: {e}")
+        
+    return None
+
 def output(queue):
     total_items = len(queue)
     index = 0
@@ -37,6 +67,10 @@ def output(queue):
 
 # Function for posting tweets via Puppeteer
 def post(item):
+    # Set up our working path directory for temporary GIF downloads
+    from settings.paths import image_path
+    image_dir = image_path
+
     text_content = item["post"].text_content("twitter")
     quote_id = database.get_id(item["post"].info["quote_id"], "twitter")
     reply_id = database.get_id(item["post"].info["reply_id"], "twitter")
@@ -71,14 +105,38 @@ def post(item):
             else:
                 logger.info(f"Standard domain detected ({embed_url}). Skipping image injection proxy to preserve native Twitter scraper behavior.")
     
+    # Track any local files generated inside this loop execution to clean up later
+    local_temp_gifs = []
+
     for text_post in text_content:
+        # --- PRECISE TWITTER GIF EXTRACTION & SCRUBBING ENGINE ---
+        klipy_match = re.search(r'(https://static\.klipy\.com/[^\s\n\r]+)', text_post)
+        local_gif_path = None
+        
+        if klipy_match:
+            raw_url = klipy_match.group(1)
+            logger.info(f"Targeting authenticated native Twitter GIF text element: {raw_url}")
+            
+            # Download file locally to your machine's temporary script dir
+            local_gif_path = handle_klipy_twitter_gif(raw_url, item["id"], image_dir)
+            if local_gif_path:
+                local_temp_gifs.append(local_gif_path)
+                
+                # Aggressively slice out the raw URL string match along with immediate trailing whitespace bounds
+                text_post = re.sub(re.escape(raw_url) + r'\s*', '', text_post).strip()
+                embed_url = None
+                bsky_thumb_url = None
+
         logger.info(f"Posting \"{text_post}\" to Twitter via Puppeteer.")
         
-        # Prepare media files payload if present
         media_paths = []
-        if media:
+        # If an embedded Klipy GIF was processed, prioritize it natively inside the upload sequence
+        if local_gif_path:
+            media_paths = [local_gif_path]
+            media = [] 
+        elif media:
             media_paths = [media_item["filename"] for media_item in media]
-            media = [] # Media belongs only to the first tweet of a split thread
+            media = [] 
 
         # Prepare parameters to pass over to Node.js
         payload = {
@@ -111,6 +169,10 @@ def post(item):
             
         except subprocess.CalledProcessError as err:
             logger.error(f"Puppeteer script crashed: {err.stderr}")
+            # Ensure local trash cleanup runs even if sub-process throws an exception
+            for f in local_temp_gifs:
+                if os.path.exists(f):
+                    os.remove(f)
             raise Exception("Puppeteer automated browser dispatch failed.")
 
         index = index + 1
@@ -118,6 +180,15 @@ def post(item):
             queue_cooldown = random.randint(10, 20)
             logger.info(f"Pausing for {queue_cooldown} seconds before processing the next item in the queue...")
             time.sleep(queue_cooldown)
+
+    # Post-execution cleanup: Erase temporary downloaded GIF assets from disk
+    for f in local_temp_gifs:
+        try:
+            if os.path.exists(f):
+                os.remove(f)
+                logger.info(f"Cleaned up local temporary GIF asset file: {f}")
+        except Exception as e:
+            logger.error(f"Failed to delete local temporary GIF payload structure {f}: {e}")
 
     database.update(item["id"], "twitter", reply_id)
 
