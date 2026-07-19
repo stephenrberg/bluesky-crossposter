@@ -3,6 +3,7 @@ import requests
 import tempfile
 import os
 import re
+from urllib.parse import urlparse, urlunparse, parse_qs
 from main.functions import logger
 from main.connections import mastodon_connect
 from settings.auth import MASTODON_HANDLE, MASTODON_INSTANCE
@@ -34,6 +35,40 @@ def repost(item):
     database.update(item["id"], "mastodon")
     logger.info(f"Reposted post on Mastodon: {post_id}")
     logger.debug(a)
+
+def handle_klipy_mastodon_mp4(raw_url, post_id):
+    """
+    Parses the validated Klipy link layout, extracts the server-side mp4 parameter string,
+    replaces the trailing .gif reference with the direct video hash filename, downloads the loop
+    natively to a local temp vector file, and yields the absolute tracking path.
+    """
+    try:
+        parsed_url = urlparse(raw_url)
+        query_params = parse_qs(parsed_url.query)
+        
+        mp4_id = query_params.get('mp4', [None])[0]
+        
+        if mp4_id:
+            path_segments = parsed_url.path.split('/')
+            if path_segments:
+                path_segments[-1] = f"{mp4_id}.mp4" 
+                new_path = "/".join(path_segments)
+                
+                video_url = f"https://{parsed_url.netloc}{new_path}"
+                logger.info(f"Formed clean target video path destination for Mastodon: {video_url}")
+            
+                response = requests.get(video_url, timeout=15)
+                if response.status_code == 200:
+                    fd, temp_path = tempfile.mkstemp(suffix=".mp4")
+                    with open(fd, "wb") as f:
+                        f.write(response.content)
+                    
+                    return temp_path
+                    
+    except Exception as e:
+        logger.error(f"Failed to pull remote Klipy video loop binary for Mastodon local payload: {e}")
+        
+    return None
 
 # Function for sending posts
 def post(item):
@@ -68,7 +103,29 @@ def post(item):
     temp_files_to_clean = []
 
     # If post includes native images, upload them directly
-    if item["post"].media:
+    # --- ADVANCED INLINE GIF RESOLUTION ENGINE ---
+    # Intercept first thread index block to verify if inline text GIFs exist
+    if text_content and len(text_content) > 0:
+        klipy_match = re.search(r'(https://static\.klipy\.com/[^\s\n\r]+)', text_content[0])
+        if klipy_match:
+            raw_url = klipy_match.group(1)
+            logger.info(f"Targeting authenticated native Mastodon GIF text element: {raw_url}")
+            
+            # Request the native .mp4 alternative down to temp folder bounds
+            local_video_path = handle_klipy_mastodon_mp4(raw_url, item["id"])
+            if local_video_path:
+                temp_files_to_clean.append(local_video_path)
+                
+                # Upload directly as a synchronous video asset mapping
+                logger.info(f"Uploading looping video to Mastodon framework instance...")
+                res = mastodon_client.media_post(local_video_path, description="Looping animation", synchronous=True)
+                media_ids.append(res.id)
+                
+                # Aggressively remove the link and trailing spaces right here from the parent index array slice
+                text_content[0] = re.sub(re.escape(raw_url) + r'\s*', '', text_content[0]).strip()
+
+    # If post includes native images, upload them directly (only run if no Klipy GIF was processed)
+    if item["post"].media and not media_ids:
         for media_item in item["post"].media:
             # If alt text was added to the image on bluesky, it's also added to the image on mastodon,
             # otherwise it will be uploaded without alt text.
@@ -81,7 +138,7 @@ def post(item):
             media_ids.append(res.id)
             
     # WORKAROUND: If post is text-only but has a link card object pointing to our problematic platforms
-    else:
+    elif not media_ids:
         embed_url = None
         bsky_thumb_url = None
         
