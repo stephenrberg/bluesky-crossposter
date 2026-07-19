@@ -7,6 +7,10 @@ from main.alerts import send_failure_alert
 import re
 import time
 import json
+import requests
+import os
+import tempfile
+from urllib.parse import urlparse, urlunparse
 
 def extract_all_hashtags(text):
     if not text:
@@ -36,6 +40,31 @@ def process_tumblr_text(text):
     cleaned_text = re.sub(url_pattern, r'[\1](\1)', cleaned_text)
 
     return cleaned_text.strip()
+
+def handle_klipy_tumblr_gif(raw_url, post_id):
+    """
+    Downloads the clean source GIF file from Klipy directly onto the local host system
+    so the Tumblr API client can attach it natively as a media parameter.
+    """
+    try:
+        parsed_url = urlparse(raw_url)
+        # Strip trailing parameters to isolate the raw static GIF asset path
+        clean_path = urlunparse((parsed_url.scheme, parsed_url.netloc, parsed_url.path, '', '', ''))
+        
+        logger.info(f"Downloading original source GIF for Tumblr upload: {clean_path}")
+        
+        response = requests.get(clean_path, timeout=15)
+        if response.status_code == 200:
+            fd, temp_path = tempfile.mkstemp(suffix=".gif")
+            with open(fd, "wb") as f:
+                f.write(response.content)
+            
+            return temp_path
+            
+    except Exception as e:
+        logger.error(f"Failed to pull remote Klipy GIF binary for Tumblr payload: {e}")
+        
+    return None
 
 def wait_for_media_processing(tumblr_client, blog_name, draft_id, media_type="photo"):
     """
@@ -107,7 +136,28 @@ def post(item):
     full_raw_text = " ".join(text_content)
     tags = extract_all_hashtags(full_raw_text)
     
-    # Stitch the raw content together first so we can parse across the whole post structure
+    # Track any local temporary files generated in this run context to ensure quick cleanup
+    temp_files_to_clean = []
+    klipy_gif_local_path = None
+    
+    # --- PRECISE EMBED DESTRUCTION & SCRUBBING ENGINE ---
+    # Scan the text content components for presence of the dynamic Klipy URL block
+    # Doing this prior to thread splitting ensures text strings are cleanly updated upstream
+    klipy_match = re.search(r'(https://static\.klipy\.com/[^\s\n\r]+)', full_raw_text)
+    if klipy_match:
+        raw_url = klipy_match.group(1)
+        logger.info(f"Targeting authenticated native Tumblr GIF text element: {raw_url}")
+        
+        # Pull the asset down to the host partition
+        local_gif = handle_klipy_tumblr_gif(raw_url, item["id"])
+        if local_gif:
+            klipy_gif_local_path = local_gif
+            temp_files_to_clean.append(local_gif)
+            
+            # Aggressively remove the link and trailing spaces right out of all parts of the thread text
+            text_content = [re.sub(re.escape(raw_url) + r'\s*', '', part).strip() for part in text_content]
+    
+    # Re-stitch the normalized clean content strings together
     combined_text = "\n\n".join(text_content)
     
     # --- THREAD / REPLY HANDLING ---
@@ -143,7 +193,26 @@ def post(item):
         # --- MEDIA WITHIN THREADS WORKAROUND (PURE HTML STRATEGY) ---
         embedded_media_html = ""
         
-        if item["post"].media:
+        # If an embedded text GIF was processed, prioritize it inside the HTML thread container logic
+        if klipy_gif_local_path:
+            try:
+                logger.info(f"Uploading thread text GIF proxy asset to CDN: {klipy_gif_local_path}")
+                media_res = tumblr_client.create_photo(TUMBLR_BLOG_NAME, state="draft", data=klipy_gif_local_path)
+                if media_res and "id" in media_res:
+                    photo_info = wait_for_media_processing(tumblr_client, TUMBLR_BLOG_NAME, media_res["id"], media_type="photo")
+                    final_photo_id = photo_info.get("id", media_res["id"])
+                    photos = photo_info.get("photos", [])
+                    
+                    for p in photos:
+                        img_url = p.get("original_size", {}).get("url")
+                        if img_url:
+                            embedded_media_html += f'<img src="{img_url}"><br><br>'
+                    
+                    tumblr_client.delete_post(TUMBLR_BLOG_NAME, final_photo_id)
+            except Exception as media_upload_err:
+                logger.error(f"Failed to inline thread Klipy GIF to HTML block: {media_upload_err}")
+                
+        elif item["post"].media:
             media_paths = [media_item["filename"] for media_item in item["post"].media]
             
             for path in media_paths:
@@ -187,52 +256,67 @@ def post(item):
         html_text = combined_text.replace("\n", "<br>")
         final_comment = f"{embedded_media_html}{html_text}".strip()
 
-        # Native reblog method works reliably when handling standard HTML strings
-        response = tumblr_client.reblog(
-            TUMBLR_BLOG_NAME,
-            id=reply_to_post,
-            reblog_key=reblog_key,
-            comment=final_comment,
-            tags=combined_tags,
-            format="html"
-        )
-        
-        if response and "id" in response:
-            database.update(item["id"], "tumblr", str(response["id"]))
-            logger.info(f"Successfully threaded to Tumblr! Post ID: {response['id']}")
-        else:
-            raise Exception(f"Tumblr API returned an unexpected payload during thread reblog: {response}")
+        try:
+            response = tumblr_client.reblog(
+                TUMBLR_BLOG_NAME,
+                id=reply_to_post,
+                reblog_key=reblog_key,
+                comment=final_comment,
+                tags=combined_tags,
+                format="html"
+            )
+            
+            if response and "id" in response:
+                database.update(item["id"], "tumblr", str(response["id"]))
+                logger.info(f"Successfully threaded to Tumblr! Post ID: {response['id']}")
+            else:
+                raise Exception(f"Tumblr API returned an unexpected payload during thread reblog: {response}")
+        finally:
+            # Perform direct file cleanup checks prior to execution termination
+            for f in temp_files_to_clean:
+                if os.path.exists(f):
+                    os.remove(f)
         return
 
     media = item["post"].media
 
-    # --- MEDIA POST HANDLING ---
-    if media:
-        # For media posts, we just clean up inline hashtags and convert URLs to markdown links
-        # (We don't drop trailing links or make Link Posts if images/videos are attached)
+    # --- MEDIA / ROOT GIF POST HANDLING ---
+    # Trigger photo/GIF mapping workflow if a Klipy asset was isolated OR native media is available
+    if media or klipy_gif_local_path:
         cull_pattern = r'(?<=\n)(?:\s*#\w+)+\s*$|(?<=[\.!\?])(?:\s+#\w+)+\s*$'
         combined_text = re.sub(cull_pattern, "", combined_text).rstrip()
         combined_text = re.sub(r'#(\w+)', lambda m: m.group(1), combined_text)
         
-        # Auto-wrap raw URLs into clickable markdown format
         url_pattern = r'(https?://[^\s<>"]+)'
         combined_text = re.sub(url_pattern, r'[\1](\1)', combined_text)
 
-        media_paths = [media_item["filename"] for media_item in media]
-        is_video = any(path.lower().endswith((".mp4", ".mov")) for path in media_paths)
+        try:
+            if klipy_gif_local_path:
+                logger.info(f"Uploading text-extracted GIF post to Tumblr blog '{TUMBLR_BLOG_NAME}'")
+                response = tumblr_client.create_photo(
+                    TUMBLR_BLOG_NAME, state="published", tags=tags, format="markdown",
+                    caption=combined_text, data=klipy_gif_local_path
+                )
+            else:
+                media_paths = [media_item["filename"] for media_item in media]
+                is_video = any(path.lower().endswith((".mp4", ".mov")) for path in media_paths)
 
-        if is_video:
-            logger.info(f"Uploading video post to Tumblr blog '{TUMBLR_BLOG_NAME}'")
-            response = tumblr_client.create_video(
-                TUMBLR_BLOG_NAME, state="published", tags=tags, format="markdown",
-                caption=combined_text, data=media_paths[0] 
-            )
-        else:
-            logger.info(f"Uploading photo post to Tumblr blog '{TUMBLR_BLOG_NAME}'")
-            response = tumblr_client.create_photo(
-                TUMBLR_BLOG_NAME, state="published", tags=tags, format="markdown",
-                caption=combined_text, data=media_paths
-            )
+                if is_video:
+                    logger.info(f"Uploading video post to Tumblr blog '{TUMBLR_BLOG_NAME}'")
+                    response = tumblr_client.create_video(
+                        TUMBLR_BLOG_NAME, state="published", tags=tags, format="markdown",
+                        caption=combined_text, data=media_paths[0] 
+                    )
+                else:
+                    logger.info(f"Uploading photo post to Tumblr blog '{TUMBLR_BLOG_NAME}'")
+                    response = tumblr_client.create_photo(
+                        TUMBLR_BLOG_NAME, state="published", tags=tags, format="markdown",
+                        caption=combined_text, data=media_paths
+                    )
+        finally:
+            for f in temp_files_to_clean:
+                if os.path.exists(f):
+                    os.remove(f)
             
     # --- TEXT ONLY / LINK POST HANDLING ---
     else:
