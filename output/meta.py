@@ -5,6 +5,7 @@ import time
 import glob
 import re
 from PIL import Image, ImageOps
+from urllib.parse import urlparse, urlunparse, parse_qs
 from settings import auth
 from settings.paths import image_path
 from main.functions import logger, split_text, remove_sky_hashtags
@@ -178,6 +179,48 @@ def upload_to_s3(file_path):
         logger.error(f"S3 Upload failed: {e}")
         return None
 
+def handle_klipy_gif(raw_url, post_id, image_dir):
+    """
+    Parses the validated Klipy link structure, pulls the dynamic mp4 parameter string,
+    replaces the trailing .gif reference with the direct video hash, downloads the loop,
+    and returns the public cloud destination payload.
+    """
+    try:
+        parsed_url = urlparse(raw_url)
+        query_params = parse_qs(parsed_url.query)
+        
+        mp4_id = query_params.get('mp4', [None])[0]
+        
+        if mp4_id:
+            path_segments = parsed_url.path.split('/')
+            if path_segments:
+                path_segments[-1] = f"{mp4_id}.mp4" 
+                new_path = "/".join(path_segments)
+                
+                video_url = f"https://{parsed_url.netloc}{new_path}"
+                logger.info(f"Formed clean target video path destination: {video_url}")
+            
+                response = requests.get(video_url, timeout=15)
+                if response.status_code == 200:
+                    local_name = f"gif_{post_id}.mp4"
+                    local_path = os.path.join(image_dir, local_name)
+                    
+                    with open(local_path, "wb") as f:
+                        f.write(response.content)
+                    
+                    s3_url = upload_to_s3(local_path)
+                    
+                    if os.path.exists(local_path):
+                        os.remove(local_path)
+                        
+                    if s3_url:
+                        return s3_url, True
+                    
+    except Exception as e:
+        logger.error(f"Failed to cleanly intercept or swap Klipy directory target parameters: {e}")
+        
+    return None, False
+
 def output(platform, queue_items):
     image_dir = image_path 
 
@@ -221,6 +264,26 @@ def output(platform, queue_items):
 
         raw_text = source_post.info.get("text", "")
         
+        # --- PRECISE EMBED DESTRUCTION & SCRUBBING ENGINE ---
+        klipy_s3_url = None
+        klipy_is_video = False
+        
+        klipy_match = re.search(r'(https://static\.klipy\.com/[^\s]+)', raw_text)
+        if klipy_match:
+            raw_url = klipy_match.group(1)
+            logger.info(f"Targeting authenticated native GIF text element: {raw_url}")
+            
+            s3_link, is_video_loop = handle_klipy_gif(raw_url, post_id, image_dir)
+            if s3_link:
+                klipy_s3_url = s3_link
+                klipy_is_video = is_video_loop
+                public_urls.append(klipy_s3_url)
+                is_video = True  
+                
+                raw_text = raw_text.replace(raw_url, "").strip()
+                embed_url = None
+                bsky_thumb_url = None
+        
         if platform == "threads":
             # Apply the logic to find 1 topic tag and clean the rest
             post_text = process_threads_hashtags(raw_text)
@@ -228,24 +291,22 @@ def output(platform, queue_items):
             # Use your standard hashtag remover for Instagram/others
             post_text = remove_sky_hashtags(raw_text)
 
-        # Check media attachments or our active fallback thumbnail configuration
-        has_native_media = bool(source_post.info.get('media'))
+        has_native_media = bool(source_post.info.get('media')) or bool(klipy_s3_url)
         has_proxy_image = bool(bsky_thumb_url)
 
         # Safeguard: Instagram skips right away if it has no native media assets
-        if platform == "instagram" and not has_native_media:
+        if platform == "instagram" and (not has_native_media or klipy_s3_url):
             logger.info(f"Skipping Instagram: Post ID {post_id} is link/text-only. Embed image ignored for IG.")
             database.update(post_id, platform, "skipped") 
             database.save()
             continue
       
-        logger.info(f"Posting \"{post_text}\" to {platform}")
+        logger.info(f"Posting \"{post_text}\" to {platform} (Media count: {len(public_urls)}, Is Video: {is_video})")
 
         # 1. Process regular attachment media if present
-        if has_native_media:
+        if has_native_media and not klipy_s3_url:
             all_files = glob.glob(os.path.join(image_dir, "*"))
             
-            # RESILIENT FIX: Match files starting with post_id while strictly skipping processed variants
             this_post_files = []
             for f in all_files:
                 fname = os.path.basename(f)
@@ -279,7 +340,7 @@ def output(platform, queue_items):
                 continue
 
         # 2. Alternatively, route targeted external link card thumb through S3 bucket (Threads Only)
-        elif has_proxy_image and platform == "threads":
+        elif has_proxy_image and platform == "threads" and not klipy_s3_url:
             logger.info(f"Downloading external proxy link card thumbnail from: {bsky_thumb_url}")
             try:
                 response = requests.get(bsky_thumb_url, timeout=15)
@@ -339,8 +400,18 @@ def publish_to_meta(platform, text, media_urls, is_video, reply_id=None, embed_u
         pub = f"https://graph.threads.net/v1.0/{user_id}/threads_publish"
         text_key = 'text'
 
+    # --- SINGLE VIDEO LOGIC ---
+    if is_video and media_urls:
+        video_url = media_urls[0]
+        payload = {
+            'access_token': token, 
+            text_key: text,
+            'media_type': 'REELS' if platform == "instagram" else 'VIDEO',
+            'video_url': video_url
+        }
+
     # --- CAROUSEL LOGIC (Multiple Images) ---
-    if len(media_urls) > 1 and not is_video:
+    elif len(media_urls) > 1 and not is_video:
         child_ids = []
         logger.info(f"Creating carousel with {len(media_urls)} images...")
         
@@ -372,16 +443,6 @@ def publish_to_meta(platform, text, media_urls, is_video, reply_id=None, embed_u
             'media_type': 'CAROUSEL',
             'children': ','.join(child_ids),
             text_key: text
-        }
-    
-    # --- SINGLE VIDEO LOGIC ---
-    elif is_video and media_urls:
-        video_url = [u for u in media_urls if ".mp4" in u.lower()][0]
-        payload = {
-            'access_token': token, 
-            text_key: text,
-            'media_type': 'REELS' if platform == "instagram" else 'VIDEO',
-            'video_url': video_url
         }
 
     # --- SINGLE IMAGE LOGIC ---
