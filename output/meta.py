@@ -44,47 +44,69 @@ def process_threads_hashtags(text):
     if not tags_found:
         return text.strip()
 
-    # 2. Determine Trailing Cluster (now allows for a URL at the very end)
-    # This matches: [optional space] [one or more hashtags] [optional space] [optional URL]
-    trailing_pattern = r'((?:\s*#\w+)+)\s*(https?://\S+)?\s*$'
+    # 2. Determine Trailing Cluster (allows for Emojis, spaces, and optional URL at the end)
+    trailing_pattern = r'((?:\s*(?:#\w+|[^\w\s#]+))+\s*)*(https?://\S+)?\s*$'
     trailing_match = re.search(trailing_pattern, text)
     
     trailing_tags_str = ""
     url_at_end = ""
     
     if trailing_match:
-        trailing_tags_str = trailing_match.group(1) # The cluster of #tags
-        url_at_end = trailing_match.group(2) or "" # The URL (if present)
+        trailing_tags_str = trailing_match.group(1) or ""
+        url_at_end = trailing_match.group(2) or ""
 
-    trailing_tags = re.findall(r'#\w+', trailing_tags_str)
-
-    # 3. Define the Topic (Priority: In-sentence tag > First trailing tag)
-    body_tags = [t.group(0) for t in tags_found if t.group(0) not in trailing_tags]
-    topic_tag = body_tags[0] if body_tags else (trailing_tags[0] if trailing_tags else tags_found[0].group(0))
-
-    # 4. Cleanup the Trailing Cluster but keep the URL
-    if trailing_tags_str:
-        # Cut off the tags and the URL, but we'll add the URL back later
-        text = text[:trailing_match.start()].rstrip()
-
-    # 5. Deduplication & One-Tag Rule
-    # We replace EVERY hashtag we find. If it's the topic_tag, we only keep the FIRST one we see.
-    topic_kept = False
-    def dedupe_and_remove(match):
-        nonlocal topic_kept
-        found_tag = match.group(0)
-        if found_tag == topic_tag and not topic_kept:
-            topic_kept = True
-            return found_tag
-        return ""
-
-    cleaned_text = re.sub(r'#\w+', dedupe_and_remove, text)
-
-    # 6. Re-attach Topic/URL
-    # If the topic was never "kept" (meaning it was only in the trailing cluster)
-    if not topic_kept:
-        cleaned_text = cleaned_text.rstrip() + f"\n\n{topic_tag}"
+    trailing_tags_matches = list(re.finditer(r'#\w+', trailing_tags_str))
+    trailing_tag_spans = []
     
+    if trailing_match and trailing_match.start(1) != -1:
+        cluster_offset = trailing_match.start(1)
+        trailing_tag_spans = [
+            (m.start() + cluster_offset, m.end() + cluster_offset) 
+            for m in trailing_tags_matches
+        ]
+
+    # 3. Separate body hashtag matches from trailing hashtag matches
+    body_matches = []
+    trailing_matches = []
+
+    for tag in tags_found:
+        is_trailing = any(start <= tag.start() < end for start, end in trailing_tag_spans)
+        if is_trailing:
+            trailing_matches.append(tag)
+        else:
+            body_matches.append(tag)
+
+    # 4. Trim trailing block from body text
+    if trailing_match and trailing_match.group(1):
+        text_body = text[:trailing_match.start(1)].rstrip()
+    else:
+        text_body = text
+
+    # 5. Determine the preserved topic tag (Priority: First body tag > First trailing tag)
+    if body_matches:
+        topic_tag_str = body_matches[0].group(0)
+    elif trailing_matches:
+        topic_tag_str = trailing_matches[0].group(0)
+    else:
+        topic_tag_str = tags_found[0].group(0)
+
+    # 6. Process body tags: Keep the first hashtag as #tag, convert additional ones to tag (remove #)
+    first_body_tag_kept = False
+
+    def clean_body_tags(match):
+        nonlocal first_body_tag_kept
+        if not first_body_tag_kept:
+            first_body_tag_kept = True
+            return match.group(0)  # Keeps '#tag'
+        return match.group(1)      # Un-hashes to 'tag'
+
+    cleaned_text = re.sub(r'#(\w+)', clean_body_tags, text_body)
+
+    # 7. Re-attach Topic Tag and/or URL if needed
+    # If no body hashtag was kept with '#', place the topic tag at the end on a new line
+    if not first_body_tag_kept:
+        cleaned_text = cleaned_text.rstrip() + f"\n\n{topic_tag_str}"
+
     # If there was a Letterboxd URL, put it back at the very end
     if url_at_end:
         # CLEANUP FIX: Strip out invisible unicode anomalies (like \u2060) and trailing whitespaces
