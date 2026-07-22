@@ -84,7 +84,8 @@ def wait_for_media_processing(tumblr_client, blog_name, draft_id, media_type="ph
                 
                 if media_type == "video":
                     video_url = post_data.get("video_url")
-                    if video_url:
+                    # Ensure video URL exists and post state isn't stuck processing
+                    if video_url and post_data.get("state") != "transcoding":
                         return post_data
                 else:  # photo
                     photos = post_data.get("photos", [])
@@ -192,6 +193,7 @@ def post(item):
 
         # --- MEDIA WITHIN THREADS WORKAROUND (PURE HTML STRATEGY) ---
         embedded_media_html = ""
+        contains_video = False
         
         # If an embedded text GIF was processed, prioritize it inside the HTML thread container logic
         if klipy_gif_local_path:
@@ -218,6 +220,7 @@ def post(item):
             for path in media_paths:
                 try:
                     if path.lower().endswith((".mp4", ".mov")):
+                        contains_video = True
                         logger.info(f"Uploading thread video asset proxy to CDN: {path}")
                         media_res = tumblr_client.create_video(TUMBLR_BLOG_NAME, state="draft", data=path)
                         if media_res and "id" in media_res:
@@ -267,8 +270,24 @@ def post(item):
             )
             
             if response and "id" in response:
-                database.update(item["id"], "tumblr", str(response["id"]))
-                logger.info(f"Successfully threaded to Tumblr! Post ID: {response['id']}")
+                returned_id = str(response["id"])
+                
+                # Double-check post ID if a video was included in the thread
+                if contains_video:
+                    logger.info("Video detected in thread. Verifying published post ID on timeline...")
+                    time.sleep(3)  # Short pause for Tumblr to finalize async transcode registration
+                    try:
+                        recent = tumblr_client.posts(TUMBLR_BLOG_NAME, limit=1)
+                        if recent.get("posts"):
+                            published_id = str(recent["posts"][0]["id"])
+                            if published_id != returned_id:
+                                logger.info(f"Corrected video thread post ID: {returned_id} -> {published_id}")
+                                returned_id = published_id
+                    except Exception as verify_err:
+                        logger.warning(f"Failed to double-check video thread post ID: {verify_err}")
+
+                database.update(item["id"], "tumblr", returned_id)
+                logger.info(f"Successfully threaded to Tumblr! Post ID: {returned_id}")
             else:
                 raise Exception(f"Tumblr API returned an unexpected payload during thread reblog: {response}")
         finally:
@@ -303,9 +322,10 @@ def post(item):
 
                 if is_video:
                     logger.info(f"Uploading video post to Tumblr blog '{TUMBLR_BLOG_NAME}'")
+                    video_caption = combined_text.replace("\n", "<br>")
                     response = tumblr_client.create_video(
                         TUMBLR_BLOG_NAME, state="published", tags=tags, format="markdown",
-                        caption=combined_text, data=media_paths[0] 
+                        caption=video_caption, data=media_paths[0] 
                     )
                 else:
                     logger.info(f"Uploading photo post to Tumblr blog '{TUMBLR_BLOG_NAME}'")

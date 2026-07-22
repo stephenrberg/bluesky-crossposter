@@ -44,8 +44,8 @@ def process_threads_hashtags(text):
     if not tags_found:
         return text.strip()
 
-    # 2. Determine Trailing Cluster (allows for Emojis, spaces, and optional URL at the end)
-    trailing_pattern = r'((?:\s*(?:#\w+|[^\w\s#]+))+\s*)*(https?://\S+)?\s*$'
+    # 2. Identify the trailing hashtag block at the end (allowing for an optional URL at the very end)
+    trailing_pattern = r'((?:\s*#\w+)+)\s*(https?://\S+)?\s*$'
     trailing_match = re.search(trailing_pattern, text)
     
     trailing_tags_str = ""
@@ -58,7 +58,7 @@ def process_threads_hashtags(text):
     trailing_tags_matches = list(re.finditer(r'#\w+', trailing_tags_str))
     trailing_tag_spans = []
     
-    if trailing_match and trailing_match.start(1) != -1:
+    if trailing_match and trailing_match.group(1):
         cluster_offset = trailing_match.start(1)
         trailing_tag_spans = [
             (m.start() + cluster_offset, m.end() + cluster_offset) 
@@ -91,20 +91,20 @@ def process_threads_hashtags(text):
         topic_tag_str = tags_found[0].group(0)
 
     # 6. Process body tags: Keep the first hashtag as #tag, convert additional ones to tag (remove #)
-    first_body_tag_kept = False
+    first_body_tag_seen = False
 
     def clean_body_tags(match):
-        nonlocal first_body_tag_kept
-        if not first_body_tag_kept:
-            first_body_tag_kept = True
+        nonlocal first_body_tag_seen
+        if not first_body_tag_seen:
+            first_body_tag_seen = True
             return match.group(0)  # Keeps '#tag'
-        return match.group(1)      # Un-hashes to 'tag'
+        return match.group(1)      # Strips '#' -> 'tag'
 
     cleaned_text = re.sub(r'#(\w+)', clean_body_tags, text_body)
 
-    # 7. Re-attach Topic Tag and/or URL if needed
-    # If no body hashtag was kept with '#', place the topic tag at the end on a new line
-    if not first_body_tag_kept:
+    # 7. Re-attach Topic Tag and/or URL
+    # If no body hashtag was present/kept in the body text, append the preserved topic tag at the end
+    if not body_matches:
         cleaned_text = cleaned_text.rstrip() + f"\n\n{topic_tag_str}"
 
     # If there was a Letterboxd URL, put it back at the very end
