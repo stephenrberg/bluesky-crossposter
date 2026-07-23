@@ -74,7 +74,7 @@ def wait_for_media_processing(tumblr_client, blog_name, draft_id, media_type="ph
     delay = 2
     max_delay = 60
     attempts = 0
-    max_attempts = 8
+    max_attempts = 10
     
     while attempts < max_attempts:
         try:
@@ -139,6 +139,7 @@ def post(item):
     
     # Track any local temporary files generated in this run context to ensure quick cleanup
     temp_files_to_clean = []
+    drafts_to_delete = []
     klipy_gif_local_path = None
     
     # --- PRECISE EMBED DESTRUCTION & SCRUBBING ENGINE ---
@@ -183,7 +184,7 @@ def post(item):
                 reblog_key = parent_post.get("reblog_key")
                 parent_tags = parent_post.get("tags", [])
             else:
-                raise Exception("Post found in database but not found on Tumblr.")
+                raise Exception(f"Parent post {reply_to_post} found in database but not found on Tumblr API.")
         except Exception as fetch_err:
             raise Exception(f"Failed to fetch metadata for parent post {reply_to_post}: {fetch_err}")
 
@@ -210,7 +211,7 @@ def post(item):
                         if img_url:
                             embedded_media_html += f'<img src="{img_url}"><br><br>'
                     
-                    tumblr_client.delete_post(TUMBLR_BLOG_NAME, final_photo_id)
+                    drafts_to_delete.append(final_photo_id)
             except Exception as media_upload_err:
                 logger.error(f"Failed to inline thread Klipy GIF to HTML block: {media_upload_err}")
                 
@@ -234,7 +235,7 @@ def post(item):
                             if video_url:
                                 embedded_media_html += f'<video controls src="{video_url}" width="100%"></video><br><br>'
                             
-                            tumblr_client.delete_post(TUMBLR_BLOG_NAME, final_video_id)
+                            drafts_to_delete.append(final_video_id)
                     else:
                         logger.info(f"Uploading thread image asset proxy to CDN: {path}")
                         media_res = tumblr_client.create_photo(TUMBLR_BLOG_NAME, state="draft", data=path)
@@ -251,7 +252,7 @@ def post(item):
                                 if img_url:
                                     embedded_media_html += f'<img src="{img_url}"><br><br>'
                             
-                            tumblr_client.delete_post(TUMBLR_BLOG_NAME, final_photo_id)
+                            drafts_to_delete.append(final_photo_id)
                 except Exception as media_upload_err:
                     logger.error(f"Failed to inline thread media to HTML block: {media_upload_err}")
             
@@ -270,31 +271,43 @@ def post(item):
             )
             
             if response and "id" in response:
-                returned_id = str(response["id"])
+                initial_id = str(response["id"])
+                final_post_id = initial_id
                 
                 # Double-check post ID if a video was included in the thread
                 if contains_video:
-                    logger.info("Video detected in thread. Verifying published post ID on timeline...")
-                    time.sleep(3)  # Short pause for Tumblr to finalize async transcode registration
-                    try:
-                        recent = tumblr_client.posts(TUMBLR_BLOG_NAME, limit=1)
-                        if recent.get("posts"):
-                            published_id = str(recent["posts"][0]["id"])
-                            if published_id != returned_id:
-                                logger.info(f"Corrected video thread post ID: {returned_id} -> {published_id}")
-                                returned_id = published_id
-                    except Exception as verify_err:
-                        logger.warning(f"Failed to double-check video thread post ID: {verify_err}")
+                    logger.info("Video detected in thread. Resolving published post ID from blog timeline...")
+                    for _ in range(12):  # Poll every 5s up to 60s total
+                        time.sleep(5)
+                        try:
+                            recent = tumblr_client.posts(TUMBLR_BLOG_NAME, limit=5)
+                            posts_list = recent.get("posts", [])
+                            
+                            for p in posts_list:
+                                reblog_parent = str(p.get("reblogged_from_id", ""))
+                                if reblog_parent == str(reply_to_post):
+                                    final_post_id = str(p["id"])
+                                    break
+                            
+                            if final_post_id != initial_id:
+                                logger.info(f"Corrected video thread post ID: {initial_id} -> {final_post_id}")
+                                break
+                        except Exception as verify_err:
+                            logger.warning(f"Failed to resolve video thread post ID: {verify_err}")
 
-                database.update(item["id"], "tumblr", returned_id)
-                logger.info(f"Successfully threaded to Tumblr! Post ID: {returned_id}")
+                database.update(item["id"], "tumblr", final_post_id)
+                logger.info(f"Successfully threaded to Tumblr! Post ID: {final_post_id}")
             else:
                 raise Exception(f"Tumblr API returned an unexpected payload during thread reblog: {response}")
         finally:
-            # Perform direct file cleanup checks prior to execution termination
             for f in temp_files_to_clean:
                 if os.path.exists(f):
                     os.remove(f)
+            for draft_id in drafts_to_delete:
+                try:
+                    tumblr_client.delete_post(TUMBLR_BLOG_NAME, draft_id)
+                except Exception as del_err:
+                    logger.warning(f"Failed to delete proxy draft {draft_id}: {del_err}")
         return
 
     media = item["post"].media
@@ -327,6 +340,36 @@ def post(item):
                         TUMBLR_BLOG_NAME, state="published", tags=tags, format="markdown",
                         caption=video_caption, data=media_paths[0] 
                     )
+                    
+                    # --- MASSIVE WAIT / VERIFICATION LOOP FOR ROOT VIDEO TRANSCODING ---
+                    if response and "id" in response:
+                        temp_id = str(response["id"])
+                        final_id = temp_id
+                        
+                        logger.info(f"Root video post submitted (Initial ID: {temp_id}). Entering extended transcoding wait...")
+                        
+                        # Poll every 5s for up to 3 minutes (36 retries)
+                        for attempt in range(36):
+                            time.sleep(5)
+                            try:
+                                recent = tumblr_client.posts(TUMBLR_BLOG_NAME, limit=3)
+                                posts_list = recent.get("posts", [])
+                                
+                                if posts_list:
+                                    top_post = posts_list[0]
+                                    top_id = str(top_post["id"])
+                                    top_state = top_post.get("state", "")
+                                    
+                                    # When finished, the post gets published and obtains its final ID
+                                    if top_state != "transcoding":
+                                        final_id = top_id
+                                        logger.info(f"Transcoding complete after {(attempt+1)*5}s! Permanent Post ID resolved: {final_id}")
+                                        break
+                            except Exception as e:
+                                logger.warning(f"Error checking root video transcode state: {e}")
+                        
+                        # Store the final resolved ID back into response so the DB update grabs it
+                        response["id"] = final_id
                 else:
                     logger.info(f"Uploading photo post to Tumblr blog '{TUMBLR_BLOG_NAME}'")
                     response = tumblr_client.create_photo(
