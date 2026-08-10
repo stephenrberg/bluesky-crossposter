@@ -8,3 +8,4 @@ backups/*.bak*
 *.cache
 settings/*.py
 cookies.json
+REFRESH_TOKENS.txt
