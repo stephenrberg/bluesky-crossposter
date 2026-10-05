@@ -2,8 +2,15 @@ from main.functions import logger, cleanup
 from input.fetch import get_posts
 from output.send import send_posts
 from main.db import database
+from main.token_refresh import refresh_tokens_if_needed
 
 def run():
+    # Check and refresh tokens if needed (weekly or on expiry)
+    try:
+        refresh_tokens_if_needed()
+    except Exception as e:
+        logger.warning(f"Token refresh check failed: {e}")
+    
     queues = get_posts()
     # If no new or deleted posts are found, we can skip further actions.
     if not new_posts(queues) and not database.deleted:

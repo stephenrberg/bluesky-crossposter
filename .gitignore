@@ -8,4 +8,4 @@ backups/*.bak*
 *.cache
 settings/*.py
 cookies.json
-REFRESH_TOKENS.txt
+token_expiry.json
