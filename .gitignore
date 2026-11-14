@@ -9,3 +9,4 @@ backups/*.bak*
 settings/*.py
 cookies.json
 token_expiry.json
+db/mentions.json

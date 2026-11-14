@@ -20,6 +20,8 @@ mastodon_mentions = "account"
 # mentions set what is to be done with posts containing a mention of another user. Options are "ignore",
 # for crossposting with no change, "skip" for skipping posts with mentions, "strip" for removing
 # the starting @ of a username and "url" to replace the username with a link to their bluesky/mastodon profile.
+# This applies to users who are not in the mention map (db/mentions.json, see README). Users in the map are always
+# replaced with their mapped username, as long as the post is part of your own thread.
 # Accepted values: ignore, skip, strip, url
 mentions = "strip"
 # post_default sets default posting mode. True means all posts will be crossposted unless otherwise specified,

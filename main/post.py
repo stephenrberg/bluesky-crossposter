@@ -1,6 +1,7 @@
 from copy import deepcopy
 from main.functions import logger, split_text, remove_sky_hashtags
 from settings.paths import image_path
+from main import mentions
 import random, string, urllib, requests
 import settings.settings as settings
 
@@ -54,6 +55,7 @@ class Post():
         # Making a copy of the text and then shortening the URL according to the shortening rules for the specific service
         # Allowing for an addiction to be made, since sometimes Mastodon adds a quoted post as a url
         text = deepcopy(self.info["text"]) + addition
+        text = mentions.apply(text, self.info.get("mentions"), service)
         text = self.shorten_urls(text, service)
 
         #if the service is not bluesky, remove any hashtags that end in sky
@@ -122,6 +124,9 @@ class Post():
     
     # Checking if a post is supposed to post to a specific service
     def post_toggle(self, service):
+        if not mentions.allowed(self.info.get("mentions"), service):
+            logger.info(f"Post mentions a user with no username for {service} in the mention map, skipping {service}.")
+            return False
         if self.lang_toggle(service) and settings.privacy[self.info["privacy"]][service]:
             return True
 

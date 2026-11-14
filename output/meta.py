@@ -10,6 +10,7 @@ from settings import auth
 from settings.paths import image_path
 from main.functions import logger, split_text, remove_sky_hashtags
 from main.db import database
+from main import mentions
 from main.alerts import send_failure_alert
 
 # --- CLOUDFLARE R2 CONFIG ---
@@ -284,7 +285,7 @@ def output(platform, queue_items):
             logger.info(f"Threads: Parent {source_post.info['reply_id']} not found yet. Waiting...")
             continue # Leave in queue for next run
 
-        raw_text = source_post.info.get("text", "")
+        raw_text = mentions.apply(source_post.info.get("text", ""), source_post.info.get("mentions"), platform)
         
         # --- PRECISE EMBED DESTRUCTION & SCRUBBING ENGINE ---
         klipy_s3_url = None

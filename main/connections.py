@@ -145,6 +145,22 @@ class RateLimitedClient(Client):
             logger.info("Unable to retrieve reply_to-user of post. Probably a reply to a deleted post.")
             logger.debug(traceback.format_exc())
         return username
+
+    # Checks that every post above the given post in its thread was written by the given did.
+    # Anything unreadable (deleted, blocked, errors) counts as not being the user's own.
+    def is_own_chain(self, uri, did):
+        try:
+            response = self.app.bsky.feed.get_post_thread(params={"uri": uri, "depth": 0, "parent_height": 100})
+            thread = response.thread
+            while thread is not None:
+                if not hasattr(thread, "post") or thread.post.author.did != did:
+                    return False
+                thread = getattr(thread, "parent", None)
+            return True
+        except Exception:
+            logger.info("Unable to retrieve thread of post, not treating it as part of own thread.")
+            logger.debug(traceback.format_exc())
+            return False
     
 # Checks if changes are made to the Bluesky session, meaning the local session file needs to be updated
 def on_session_change(event: SessionEvent, session: Session) -> None:

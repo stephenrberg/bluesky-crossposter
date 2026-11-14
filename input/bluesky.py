@@ -6,8 +6,10 @@ from settings import settings
 from main.connections import bsky_connect
 from main.post import Post
 from main.db import database
+from main import mentions as mentioned
 # Getting posts from bluesky
 
+MENTION_SERVICES = ["twitter", "mastodon", "bluesky", "tumblr", "instagram", "threads"]
 
 
 def get_posts():
@@ -41,14 +43,23 @@ def get_posts():
         # Default is True, because if nobody is mentioned it should be posted.
         text = status.post.record.text
         mentioned_users = []
+        mentions = {}
         urls = []
         tags = []
+        # A post is part of the account's own thread if it is not a reply, or if every post above it in the thread was written by the account.
+        # The root uri contains the did of the author, so a root from someone else is ruled out without an extra request.
+        reply_ref = status.post.record.reply
+        own_thread = not reply_ref or reply_ref.root.uri.startswith(f"at://{status.post.author.did}/")
+        # The full chain is only fetched if the post has a mention that could be affected.
+        if own_thread and reply_ref and status.post.record.facets and any(
+                f.features[0].py_type == "app.bsky.richtext.facet#mention" for f in status.post.record.facets):
+            own_thread = bsky.is_own_chain(uri, status.post.author.did)
         if status.post.record.facets:
             # Sometimes bluesky shortens URLs and in that case they need to be restored before crossposting
             # (Also using this function to fetch hashtags)
             text, urls, tags = restore_urls(status.post.record)
             # Retrieving list of mentioned users
-            mentioned_users, text, urls = parse_facets(status.post.record, text, urls)
+            mentioned_users, mentions, text, urls = parse_facets(status.post.record, text, urls, own_thread)
         # Sometimes posts have included links that are not included in the actual text of the post. This adds adds that back.
         if status.post.embed and hasattr(status.post.embed, "external") and hasattr(status.post.embed.external, "uri") and status.post.embed.external.uri not in text:
             text += '\n'+status.post.embed.external.uri
@@ -165,6 +176,7 @@ def get_posts():
             "text": text,
             "urls": urls,
             "tags": tags,
+            "mentions": mentions,
             "reply_id": reply_id,
             "quote_id": quoted_id,
             "quote_url": quote_url,
@@ -239,9 +251,11 @@ def restore_urls(record):
     return text, urls, tags
 
 # Function for retrieving users and urls from facets, and converting the user to whatever format is selected in settings
-def parse_facets(record, text, urls):
+def parse_facets(record, text, urls, own_thread):
     users = []
-    encoded_text = text.encode("UTF-8")
+    mentions = {}
+    # The byte indexes of facets refer to the original text, not the one where urls have been restored
+    encoded_text = record.text.encode("UTF-8")
     for facet in record.facets:
         if facet.features[0].py_type != "app.bsky.richtext.facet#mention":
             continue
@@ -251,6 +265,13 @@ def parse_facets(record, text, urls):
         end = facet.index.byte_end
         username = encoded_text[start:end]
         username = username.decode("UTF-8")
+        # Users in the mention map are replaced with their username for each service when posting,
+        # but only if the post is part of the account's own thread.
+        if own_thread:
+            replacements = mentioned.lookup(username, facet.features[0].did, MENTION_SERVICES)
+            if replacements:
+                mentions[username] = replacements
+                continue
         # Removing @ in the beginning of username if mentions are set to "strip"
         if settings.mentions == "strip":
             text = text.replace(username, username.replace("@", ""))
@@ -263,7 +284,7 @@ def parse_facets(record, text, urls):
             text = text.replace(username, url)
             username = url
         users.append(username)
-    return users, text, urls
+    return users, mentions, text, urls
 
 
 # Quoted posts can be stored in several different ways for some reason. 

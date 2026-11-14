@@ -14,7 +14,8 @@ $syncItems = @(
     "env.example",
     "README.md",
     "requirements.txt",
-    "crossposter.js"
+    "crossposter.js",
+    "db\mentions.json"
 )
 
 if (docker ps -q -f name=$container) {
@@ -22,9 +23,10 @@ if (docker ps -q -f name=$container) {
         # Source is the specific file or folder on your T: drive
         $sourcePath = Join-Path $baseDir $item
         
-        # DESTINATION: We target the container's root directory.
-        # This tells Docker: "Put the item 'main' into '/'," which triggers a merge.
-        $destPath = "${container}:/" 
+        # DESTINATION: top-level items go to the container's root directory, which triggers a merge.
+        # Items inside a subfolder (like db\mentions.json) go to that same subfolder in the container.
+        $parent = (Split-Path $item -Parent) -replace '\\', '/'
+        $destPath = if ($parent) { "${container}:/${parent}/" } else { "${container}:/" }
 
         if (Test-Path $sourcePath) {
             Write-Host "Pushing $item to container..." -ForegroundColor Yellow

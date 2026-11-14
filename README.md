@@ -29,6 +29,19 @@ In settings.py you can configure the poster to work the way you want it, setting
 
 When first run, or run without a database file, all posts within the timelimit set by postTimeLimit in settings/settings.py will be posted. If you have used a previous version of the crossposter, place database.json-file in the db folder, and it will be converted to the new format upon first run.
 
+## Allowed mentions (Bluesky input)
+
+Create `db/mentions.json` (path set by `mentions_path` in paths.py) to allow crossposting of posts that mention specific users. The file is read once, the first time it is needed. Keys are Bluesky handles (or DIDs), and values are either one string used on every service, or an object with a username per service (services: `twitter`, `mastodon`, `bluesky`, `tumblr`, `instagram`, `threads`). A service missing from an object is skipped for any post mentioning that user (the post still goes to the other services). Use a plain string if you want the same value everywhere.
+
+```json
+{
+    "alice.bsky.social": {"mastodon": "@alice@mastodon.social", "twitter": "@alice_tw"},
+    "bob.bsky.social": "Bob"
+}
+```
+
+Mentions of users in the map are replaced with the mapped username before crossposting, but only in posts that are part of your own thread (not replies, at any depth, to other people's posts). Any other mention is handled according to the `mentions` setting, which by default skips the post.
+
 ## Running with Docker
 
 The included Dockerfile and docker-compose file can be used to run the service in a docker container. Configuration options can be set in the docker-compose file, added to an .env file (see env.example) or injected as environment variables in some other way. An additional configuration option, RUN_INTERVAL, is provided to set the interval in seconds for which to check for new posts.
