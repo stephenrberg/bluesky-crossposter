@@ -6,6 +6,7 @@ The changes are as follows:
 - Threads and instagram need to have a place to upload content to - You can use S3 buckets on AWS and the free tier should be enough (Theres also Cloud Flare R2 support but it tends to get blocked)
 - Pillow needed to do the resizing and blur boxing for instagram as they have stricter content aspect ratios for images
 - Twitter no longer uses api and instead uses puppeteer (naughty). Provide cookes from a valid session and it should look after itself
+- Twitter keeps at most three hashtags per tweet by trimming a standalone trailing hashtag block; inline hashtags are never removed, even if they already exceed three.
 - Can provide Pushover api keys and it will ping you if any outputs fall over (with a 1hr cooldown on post reports)
 - Other change is that on other outputs it automatically removes any bluesky hashtags (tags ending in sky)
 - First hashtag in a post is used as the topic on Threads (and the rest of the tags are removed)

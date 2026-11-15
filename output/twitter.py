@@ -16,6 +16,29 @@ from main.alerts import send_failure_alert
 # List of domains that require the image injection workaround
 TARGET_DOMAINS = ["serializd.com", "goodreads.com"]
 
+def limit_trailing_hashtags(text):
+    trailing = re.search(
+        r'(?m)^[ \t]*(?P<tags>#\w+(?:\s+#\w+)*)(?P<suffix>[ \t\r\n]*(?:https?://\S+)?[ \t\r\n]*)\Z',
+        text
+    )
+    if not trailing:
+        return text
+
+    body = text[:trailing.start()]
+    body_without_urls = re.sub(r'https?://\S+|www\.\S+', '', body)
+    body_tags = re.findall(r'(?<![\w#])#\w+', body_without_urls)
+    trailing_tags = list(re.finditer(r'#\w+', trailing.group('tags')))
+    allowed = max(0, 3 - len(body_tags))
+    if len(trailing_tags) <= allowed:
+        return text
+
+    if allowed:
+        end = trailing.start('tags') + trailing_tags[allowed - 1].end()
+        return text[:end] + trailing.group('suffix')
+
+    suffix = trailing.group('suffix')
+    return body.rstrip() + (suffix if suffix.strip() else '')
+
 def handle_klipy_twitter_gif(raw_url, post_id, image_dir):
     """
     Downloads the clean source GIF file from Klipy directly onto the local host system
@@ -127,6 +150,7 @@ def post(item):
                 embed_url = None
                 bsky_thumb_url = None
 
+        text_post = limit_trailing_hashtags(text_post)
         logger.info(f"Posting \"{text_post}\" to Twitter via Puppeteer.")
         
         media_paths = []
